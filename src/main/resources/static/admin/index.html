@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DiDi 管理后台</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #f0f2f5; display: flex; min-height: 100vh; }
+
+/* 登录页 */
+.login-wrap { width: 100%; display: flex; align-items: center; justify-content: center; }
+.login-box { background: #fff; border-radius: 8px; padding: 40px; width: 360px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+.login-box h2 { text-align: center; margin-bottom: 28px; color: #001529; font-size: 20px; }
+.login-box h2 span { color: #ff6b00; }
+.form-item { margin-bottom: 16px; }
+.form-item label { display: block; font-size: 13px; color: #666; margin-bottom: 6px; }
+.form-item input { width: 100%; border: 1px solid #ddd; border-radius: 5px; padding: 9px 12px; font-size: 14px; outline: none; }
+.form-item input:focus { border-color: #1890ff; }
+.login-btn { width: 100%; background: #1890ff; color: #fff; border: none; border-radius: 5px; padding: 10px; font-size: 15px; cursor: pointer; margin-top: 8px; }
+.login-btn:hover { background: #40a9ff; }
+.login-err { color: #ff4d4f; font-size: 13px; margin-top: 8px; text-align: center; min-height: 20px; }
+
+.sidebar { width: 200px; background: #001529; color: #fff; flex-shrink: 0; }
+.logo { padding: 18px 20px; font-size: 16px; font-weight: bold; border-bottom: 1px solid rgba(255,255,255,0.1); color: #ff6b00; }
+.menu-item { padding: 13px 20px; cursor: pointer; font-size: 14px; color: rgba(255,255,255,0.65); }
+.menu-item:hover, .menu-item.active { background: #1890ff; color: #fff; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.topbar { background: #fff; padding: 0 24px; height: 52px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #f0f0f0; font-size: 15px; font-weight: bold; }
+.content { flex: 1; padding: 20px; overflow-y: auto; }
+.page { display: none; }
+.page.active { display: block; }
+
+.stats-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 20px; }
+.stat-card { background: #fff; border-radius: 8px; padding: 18px; }
+.stat-card .lbl { font-size: 12px; color: #999; margin-bottom: 6px; }
+.stat-card .val { font-size: 26px; font-weight: bold; }
+.stat-card .chg { font-size: 12px; margin-top: 4px; }
+
+.chart-row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 20px; }
+.chart-card { background: #fff; border-radius: 8px; padding: 18px; }
+.chart-card h4 { font-size: 13px; margin-bottom: 14px; }
+.bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 140px; padding-bottom: 22px; }
+.bar { flex: 1; background: #1890ff; border-radius: 3px 3px 0 0; position: relative; min-height: 4px; }
+.bar:last-child { background: #ff6b00; }
+.bl { position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%); font-size: 10px; color: #999; white-space: nowrap; }
+.bv { position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font-size: 10px; color: #555; white-space: nowrap; }
+
+.card { background: #fff; border-radius: 8px; padding: 18px; margin-bottom: 14px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.card-header h4 { font-size: 14px; }
+.filters { display: flex; gap: 8px; }
+.filters input, .filters select { border: 1px solid #ddd; border-radius: 5px; padding: 5px 10px; font-size: 13px; }
+.btn { padding: 5px 12px; border: none; border-radius: 5px; font-size: 13px; cursor: pointer; }
+.btn-blue { background: #1890ff; color: #fff; }
+.btn-green { background: #52c41a; color: #fff; }
+.btn-red { background: #ff4d4f; color: #fff; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { background: #fafafa; padding: 9px 12px; text-align: left; color: #666; font-weight: 500; border-bottom: 1px solid #f0f0f0; }
+td { padding: 11px 12px; border-bottom: 1px solid #f0f0f0; }
+tr:last-child td { border-bottom: none; }
+.badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+.b-green { background: #f6ffed; color: #52c41a; }
+.b-red { background: #fff2f0; color: #ff4d4f; }
+.b-blue { background: #e6f7ff; color: #1890ff; }
+.b-orange { background: #fff7e6; color: #fa8c16; }
+.b-gray { background: #f5f5f5; color: #999; }
+.ops a { color: #1890ff; cursor: pointer; margin-right: 8px; font-size: 12px; }
+.ops a.red { color: #ff4d4f; }
+.pager { display: flex; justify-content: flex-end; margin-top: 12px; gap: 4px; align-items: center; font-size: 13px; color: #666; }
+.pg { padding: 3px 9px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; font-size: 13px; background: #fff; }
+.pg.active { background: #1890ff; color: #fff; border-color: #1890ff; }
+.loading { color: #999; font-size: 13px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<!-- 登录页（未登录时显示） -->
+<div class="login-wrap" id="login-page">
+  <div class="login-box">
+    <h2><span>DiDi</span> 管理后台</h2>
+    <div class="form-item">
+      <label>用户名</label>
+      <input id="login-username" type="text" placeholder="请输入用户名" value="admin">
+    </div>
+    <div class="form-item">
+      <label>密码</label>
+      <input id="login-password" type="password" placeholder="请输入密码" value="admin123"
+             onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="login-btn" onclick="doLogin()">登 录</button>
+    <div class="login-err" id="login-err"></div>
+  </div>
+</div>
+
+<!-- 主界面（登录后显示） -->
+<div id="main-page" style="display:none;width:100%;flex:1">
+
+<div class="sidebar">
+  <div class="logo">DiDi 管理后台</div>
+  <div class="menu-item active"  onclick="go('dashboard',this)">数据看板</div>
+  <div class="menu-item" onclick="go('orders',this)">订单管理</div>
+  <div class="menu-item" onclick="go('drivers',this)">司机管理</div>
+  <div class="menu-item" onclick="go('passengers',this)">乘客管理</div>
+  <div class="menu-item" onclick="go('audit',this)">资质审核</div>
+  <div class="menu-item" onclick="go('finance',this)">财务统计</div>
+</div>
+
+<div class="main">
+  <div class="topbar">
+    <span id="ptitle">数据看板</span>
+    <span style="font-size:13px;font-weight:normal;color:#666">管理员：admin</span>
+  </div>
+  <div class="content">
+
+    <!-- 数据看板 -->
+    <div id="p-dashboard" class="page active">
+      <div class="stats-row">
+        <div class="stat-card"><div class="lbl">今日订单</div><div class="val" id="s-orders" style="color:#1890ff">-</div></div>
+        <div class="stat-card"><div class="lbl">今日营收</div><div class="val" id="s-revenue" style="color:#52c41a">-</div></div>
+        <div class="stat-card"><div class="lbl">活跃司机</div><div class="val" id="s-drivers" style="color:#fa8c16">-</div></div>
+        <div class="stat-card"><div class="lbl">活跃乘客</div><div class="val" id="s-passengers" style="color:#722ed1">-</div></div>
+      </div>
+      <div class="chart-row">
+        <div class="chart-card">
+          <h4>近7日订单量趋势</h4>
+          <div class="bar-chart" id="bar-chart"></div>
+        </div>
+        <div class="chart-card">
+          <h4>订单状态说明</h4>
+          <div style="font-size:13px;color:#666;line-height:2">
+            <div><span class="badge b-orange">待接单</span> PENDING / DISPATCHING</div>
+            <div><span class="badge b-blue">行程中</span> ACCEPTED / PICKING / IN_TRIP</div>
+            <div><span class="badge b-green">已完成</span> FINISHED</div>
+            <div><span class="badge b-red">已取消</span> CANCELLED</div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h4>最新订单（最近10条）</h4></div>
+        <table>
+          <thead><tr><th>订单号</th><th>乘客ID</th><th>司机ID</th><th>起点</th><th>终点</th><th>金额</th><th>状态</th><th>时间</th></tr></thead>
+          <tbody id="recent-orders"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 订单管理 -->
+    <div id="p-orders" class="page">
+      <div class="card">
+        <div class="card-header">
+          <h4>订单列表</h4>
+          <div class="filters">
+            <select id="order-status-filter">
+              <option value="">全部状态</option>
+              <option value="PENDING">待下单</option>
+              <option value="DISPATCHING">派单中</option>
+              <option value="ACCEPTED">已接单</option>
+              <option value="IN_TRIP">行程中</option>
+              <option value="FINISHED">已完成</option>
+              <option value="CANCELLED">已取消</option>
+            </select>
+            <button class="btn btn-blue" onclick="loadOrders(1)">搜索</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>订单号</th><th>乘客ID</th><th>司机ID</th><th>起点</th><th>终点</th><th>金额</th><th>状态</th><th>下单时间</th><th>操作</th></tr></thead>
+          <tbody id="order-list"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody>
+        </table>
+        <div class="pager" id="order-pager"></div>
+      </div>
+    </div>
+
+    <!-- 司机管理 -->
+    <div id="p-drivers" class="page">
+      <div class="card">
+        <div class="card-header">
+          <h4>司机列表</h4>
+          <div class="filters">
+            <select id="driver-status-filter">
+              <option value="">全部状态</option>
+              <option value="ONLINE">在线</option>
+              <option value="OFFLINE">离线</option>
+              <option value="IN_TRIP">行程中</option>
+              <option value="BANNED">已封禁</option>
+            </select>
+            <button class="btn btn-blue" onclick="loadDrivers(1)">搜索</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>姓名</th><th>车牌</th><th>车型</th><th>评分</th><th>接单率</th><th>状态</th><th>审核</th><th>操作</th></tr></thead>
+          <tbody id="driver-list"><tr><td colspan="9" class="loading">加载中...</td></tr></tbody>
+        </table>
+        <div class="pager" id="driver-pager"></div>
+      </div>
+    </div>
+
+    <!-- 乘客管理 -->
+    <div id="p-passengers" class="page">
+      <div class="card">
+        <div class="card-header">
+          <h4>乘客列表</h4>
+          <div class="filters">
+            <button class="btn btn-blue" onclick="loadPassengers(1)">刷新</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>手机号</th><th>状态</th><th>注册时间</th><th>操作</th></tr></thead>
+          <tbody id="passenger-list"><tr><td colspan="5" class="loading">加载中...</td></tr></tbody>
+        </table>
+        <div class="pager" id="passenger-pager"></div>
+      </div>
+    </div>
+
+    <!-- 资质审核 -->
+    <div id="p-audit" class="page">
+      <div class="card">
+        <div class="card-header"><h4 id="audit-title">待审核司机</h4></div>
+        <table>
+          <thead><tr><th>ID</th><th>姓名</th><th>车牌</th><th>车型</th><th>操作</th></tr></thead>
+          <tbody id="audit-list"><tr><td colspan="5" class="loading">加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 财务统计 -->
+    <div id="p-finance" class="page">
+      <div class="stats-row">
+        <div class="stat-card"><div class="lbl">今日营收</div><div class="val" id="f-revenue" style="color:#52c41a">-</div></div>
+        <div class="stat-card"><div class="lbl">平台抽成(20%)</div><div class="val" id="f-platform" style="color:#1890ff">-</div></div>
+        <div class="stat-card"><div class="lbl">司机收入(80%)</div><div class="val" id="f-driver" style="color:#fa8c16">-</div></div>
+        <div class="stat-card"><div class="lbl">今日订单量</div><div class="val" id="f-orders" style="color:#722ed1">-</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h4>近7日营收明细</h4></div>
+        <table>
+          <thead><tr><th>日期</th><th>订单量</th><th>总营收</th><th>平台抽成</th><th>司机收入</th><th>取消率</th></tr></thead>
+          <tbody id="finance-list"><tr><td colspan="6" class="loading">加载中...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div><!-- /main-page -->
+
+<script>
+const API = '';  // 同源，无需前缀
+const titles = {dashboard:'数据看板',orders:'订单管理',drivers:'司机管理',passengers:'乘客管理',audit:'资质审核',finance:'财务统计'};
+
+// ---- 页面切换 ----
+function go(id, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('active'));
+  document.getElementById('p-' + id).classList.add('active');
+  el.classList.add('active');
+  document.getElementById('ptitle').textContent = titles[id];
+  if (id === 'dashboard') loadDashboard();
+  if (id === 'orders')    loadOrders(1);
+  if (id === 'drivers')   loadDrivers(1);
+  if (id === 'passengers') loadPassengers(1);
+  if (id === 'audit')     loadAudit();
+  if (id === 'finance')   loadFinance();
+}
+
+// ---- 通用请求 ----
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, { credentials: 'include', headers: {'Content-Type':'application/json'}, ...opts });
+  return res.json();
+}
+
+// ---- 状态徽章 ----
+const statusBadge = {
+  ONLINE:'<span class="badge b-green">在线</span>',
+  OFFLINE:'<span class="badge b-gray">离线</span>',
+  IN_TRIP:'<span class="badge b-blue">行程中</span>',
+  BANNED:'<span class="badge b-red">已封禁</span>',
+  NORMAL:'<span class="badge b-green">正常</span>',
+  PENDING:'<span class="badge b-orange">待审核</span>',
+  APPROVED:'<span class="badge b-green">已通过</span>',
+  REJECTED:'<span class="badge b-red">已拒绝</span>',
+  FINISHED:'<span class="badge b-green">已完成</span>',
+  CANCELLED:'<span class="badge b-red">已取消</span>',
+  DISPATCHING:'<span class="badge b-orange">派单中</span>',
+  ACCEPTED:'<span class="badge b-blue">已接单</span>',
+  PICKING:'<span class="badge b-blue">前往接客</span>',
+};
+const sb = s => statusBadge[s] || `<span class="badge b-gray">${s}</span>`;
+
+// ---- 数据看板 ----
+async function loadDashboard() {
+  const r = await api('/admin/stats');
+  if (r.code !== 200) return;
+  const d = r.data;
+  document.getElementById('s-orders').textContent     = d.todayOrders;
+  document.getElementById('s-revenue').textContent    = '¥' + (+d.todayRevenue).toFixed(2);
+  document.getElementById('s-drivers').textContent    = d.activeDrivers;
+  document.getElementById('s-passengers').textContent = d.activePassengers;
+
+  // 柱状图
+  const daily = d.dailyOrders;
+  const dates = Object.keys(daily).sort();
+  const vals  = dates.map(k => daily[k]);
+  const max   = Math.max(...vals, 1);
+  document.getElementById('bar-chart').innerHTML = dates.map((date, i) => {
+    const h = Math.max(Math.round(vals[i] / max * 100), 2);
+    const label = i === dates.length - 1 ? '今日' : date.slice(5);
+    return `<div class="bar" style="height:${h}%"><span class="bv">${vals[i]}</span><span class="bl">${label}</span></div>`;
+  }).join('');
+
+  // 最新订单
+  const or = await api('/admin/orders?page=1&size=10');
+  if (or.code !== 200) return;
+  const rows = or.data.records.map(o => `
+    <tr>
+      <td>${o.id}</td><td>${o.passengerId}</td><td>${o.driverId||'-'}</td>
+      <td>${o.originAddr||'-'}</td><td>${o.destAddr||'-'}</td>
+      <td>${o.actualPrice ? '¥'+o.actualPrice : '-'}</td>
+      <td>${sb(o.status)}</td><td>${(o.createdAt||'').slice(0,16)}</td>
+    </tr>`).join('');
+  document.getElementById('recent-orders').innerHTML = rows || '<tr><td colspan="8" class="loading">暂无数据</td></tr>';
+}
+
+// ---- 订单管理 ----
+let orderPage = 1;
+async function loadOrders(page) {
+  orderPage = page;
+  const status = document.getElementById('order-status-filter').value;
+  const r = await api(`/admin/orders?page=${page}&size=10${status ? '&status='+status : ''}`);
+  if (r.code !== 200) return;
+  const { records, total, current, pages } = r.data;
+  document.getElementById('order-list').innerHTML = records.map(o => `
+    <tr>
+      <td>${o.id}</td><td>${o.passengerId}</td><td>${o.driverId||'-'}</td>
+      <td>${o.originAddr||'-'}</td><td>${o.destAddr||'-'}</td>
+      <td>${o.actualPrice ? '¥'+o.actualPrice : '-'}</td>
+      <td>${sb(o.status)}</td><td>${(o.createdAt||'').slice(0,16)}</td>
+      <td><div class="ops">
+        ${['PENDING','DISPATCHING','ACCEPTED','PICKING','IN_TRIP'].includes(o.status)
+          ? `<a class="red" onclick="cancelOrder(${o.id})">强制取消</a>` : ''}
+      </div></td>
+    </tr>`).join('') || '<tr><td colspan="9" class="loading">暂无数据</td></tr>';
+  renderPager('order-pager', current, pages, loadOrders);
+}
+
+async function cancelOrder(id) {
+  if (!confirm('确认强制取消订单 ' + id + '？')) return;
+  const r = await api(`/admin/orders/${id}/cancel`, { method: 'POST' });
+  alert(r.code === 200 ? '已取消' : r.message);
+  loadOrders(orderPage);
+}
+
+// ---- 司机管理 ----
+let driverPage = 1;
+async function loadDrivers(page) {
+  driverPage = page;
+  const status = document.getElementById('driver-status-filter').value;
+  const r = await api(`/admin/drivers?page=${page}&size=10${status ? '&status='+status : ''}`);
+  if (r.code !== 200) return;
+  const { records, current, pages } = r.data;
+  document.getElementById('driver-list').innerHTML = records.map(d => `
+    <tr>
+      <td>${d.id}</td><td>${d.name}</td><td>${d.plate}</td><td>${d.carModel}</td>
+      <td>${d.rating}★</td><td>${(+d.acceptRate*100).toFixed(0)}%</td>
+      <td>${sb(d.status)}</td><td>${sb(d.auditStatus)}</td>
+      <td><div class="ops">
+        ${d.status !== 'BANNED'
+          ? `<a class="red" onclick="banDriver(${d.id})">封禁</a>`
+          : `<a style="color:#52c41a" onclick="unbanDriver(${d.id})">解封</a>`}
+      </div></td>
+    </tr>`).join('') || '<tr><td colspan="9" class="loading">暂无数据</td></tr>';
+  renderPager('driver-pager', current, pages, loadDrivers);
+}
+
+async function banDriver(id) {
+  if (!confirm('确认封禁该司机？')) return;
+  const r = await api(`/admin/drivers/${id}/ban`, { method: 'POST' });
+  alert(r.code === 200 ? '已封禁' : r.message);
+  loadDrivers(driverPage);
+}
+async function unbanDriver(id) {
+  if (!confirm('确认解封该司机？')) return;
+  const r = await api(`/admin/drivers/${id}/unban`, { method: 'POST' });
+  alert(r.code === 200 ? '已解封' : r.message);
+  loadDrivers(driverPage);
+}
+
+// ---- 乘客管理 ----
+let passengerPage = 1;
+async function loadPassengers(page) {
+  passengerPage = page;
+  const r = await api(`/admin/passengers?page=${page}&size=10`);
+  if (r.code !== 200) return;
+  const { records, current, pages } = r.data;
+  document.getElementById('passenger-list').innerHTML = records.map(u => `
+    <tr>
+      <td>${u.id}</td><td>${u.phone}</td><td>${sb(u.status)}</td>
+      <td>${(u.createdAt||'').slice(0,10)}</td>
+      <td><div class="ops">
+        ${u.status !== 'BANNED'
+          ? `<a class="red" onclick="banPassenger(${u.id})">封禁</a>`
+          : `<a style="color:#52c41a" onclick="unbanPassenger(${u.id})">解封</a>`}
+      </div></td>
+    </tr>`).join('') || '<tr><td colspan="5" class="loading">暂无数据</td></tr>';
+  renderPager('passenger-pager', current, pages, loadPassengers);
+}
+
+async function banPassenger(id) {
+  if (!confirm('确认封禁该乘客？')) return;
+  const r = await api(`/admin/passengers/${id}/ban`, { method: 'POST' });
+  alert(r.code === 200 ? '已封禁' : r.message);
+  loadPassengers(passengerPage);
+}
+async function unbanPassenger(id) {
+  if (!confirm('确认解封该乘客？')) return;
+  const r = await api(`/admin/passengers/${id}/unban`, { method: 'POST' });
+  alert(r.code === 200 ? '已解封' : r.message);
+  loadPassengers(passengerPage);
+}
+
+// ---- 资质审核 ----
+async function loadAudit() {
+  const r = await api('/admin/drivers?page=1&size=50&status=');
+  if (r.code !== 200) return;
+  const pending = r.data.records.filter(d => d.auditStatus === 'PENDING');
+  document.getElementById('audit-title').textContent = `待审核司机（${pending.length}条）`;
+  document.getElementById('audit-list').innerHTML = pending.map(d => `
+    <tr>
+      <td>${d.id}</td><td>${d.name}</td><td>${d.plate}</td><td>${d.carModel}</td>
+      <td>
+        <button class="btn btn-green" style="margin-right:6px" onclick="auditDriver(${d.id},'APPROVED',this)">通过</button>
+        <button class="btn btn-red" onclick="auditDriver(${d.id},'REJECTED',this)">拒绝</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" class="loading">暂无待审核司机</td></tr>';
+}
+
+async function auditDriver(id, action, btn) {
+  const label = action === 'APPROVED' ? '通过' : '拒绝';
+  if (!confirm(`确认${label}该司机的资质审核？`)) return;
+  const r = await api(`/admin/drivers/${id}/audit`, { method: 'POST', body: JSON.stringify({ action }) });
+  if (r.code === 200) { btn.closest('tr').remove(); alert(`已${label}`); }
+  else alert(r.message);
+}
+
+// ---- 财务统计 ----
+async function loadFinance() {
+  const r = await api('/admin/stats');
+  if (r.code !== 200) return;
+  const d = r.data;
+  const revenue = +d.todayRevenue;
+  document.getElementById('f-revenue').textContent  = '¥' + revenue.toFixed(2);
+  document.getElementById('f-platform').textContent = '¥' + (revenue * 0.2).toFixed(2);
+  document.getElementById('f-driver').textContent   = '¥' + (revenue * 0.8).toFixed(2);
+  document.getElementById('f-orders').textContent   = d.todayOrders;
+
+  const finance = d.dailyFinance;
+  const dates = Object.keys(finance).sort().reverse();
+  document.getElementById('finance-list').innerHTML = dates.map(date => {
+    const f = finance[date];
+    return `<tr>
+      <td>${date}</td>
+      <td>${f.orderCount}</td>
+      <td>¥${(+f.revenue).toFixed(2)}</td>
+      <td>¥${(+f.platformShare).toFixed(2)}</td>
+      <td>¥${(+f.driverShare).toFixed(2)}</td>
+      <td>${(+f.cancelRate * 100).toFixed(1)}%</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="loading">暂无数据</td></tr>';
+}
+
+// ---- 登录 ----
+async function doLogin() {
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  document.getElementById('login-err').textContent = '';
+  const r = await fetch('/auth/admin/login', {
+    method: 'POST', credentials: 'include',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ username, password })
+  }).then(r => r.json()).catch(() => ({ code: 500, message: '网络错误' }));
+  if (r.code === 200) {
+    showMain();
+  } else {
+    document.getElementById('login-err').textContent = r.message || '登录失败';
+  }
+}
+
+function showMain() {
+  document.getElementById('login-page').style.display = 'none';
+  const mp = document.getElementById('main-page');
+  mp.style.display = 'flex';
+  loadDashboard();
+}
+
+// ---- 初始化：检查是否已登录 ----
+api('/admin/stats').then(r => {
+  if (r.code === 200) showMain();
+  // 否则停在登录页
+}).catch(() => {});
+
+// ---- 分页组件 ----
+function renderPager(containerId, current, pages, loadFn) {
+  const el = document.getElementById(containerId);
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  let html = `<span>共 ${pages} 页</span>`;
+  for (let i = 1; i <= pages; i++) {
+    html += `<button class="pg${i===current?' active':''}" onclick="${loadFn.name}(${i})">${i}</button>`;
+  }
+  el.innerHTML = html;
+}
+
+// ---- 初始加载（由 showMain 触发，此处删除直接调用） ----
+</script>
+</body>
+</html>

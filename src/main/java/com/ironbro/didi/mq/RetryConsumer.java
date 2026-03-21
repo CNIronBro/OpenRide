@@ -1,0 +1,232 @@
+package com.ironbro.didi.mq;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ironbro.didi.config.RabbitMqConfig;
+import com.ironbro.didi.entity.Order;
+import com.ironbro.didi.entity.OrderDispatchLog;
+import com.ironbro.didi.enums.DispatchAction;
+import com.ironbro.didi.enums.OrderStatus;
+import com.ironbro.didi.mapper.DriverMapper;
+import com.ironbro.didi.mapper.OrderDispatchLogMapper;
+import com.ironbro.didi.mapper.OrderMapper;
+import com.rabbitmq.client.Channel;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 派单超时重试消费者
+ *
+ * 消费 dispatch.retry.queue 中的超时重试消息（由 dispatch.delay.queue TTL=15s 到期后路由而来）。
+ *
+ * 核心逻辑：
+ * 1. 幂等校验：比较消息中的 dispatchIndex 与 Redis 中当前索引是否一致
+ *    - 不一致：说明已有新一轮派单（司机接单或已重试），忽略此消息（ACK 即可）
+ *    - 一致：继续处理
+ * 2. 订单状态校验：若订单已不在 DISPATCHING 状态（已接单/已取消），忽略
+ * 3. 取下一位候选司机（index+1），推送并更新 Redis 索引，发新延迟消息
+ * 4. 候选列表耗尽（index 越界）：发消息到 cancel.queue，触发自动取消
+ *
+ * 幂等设计说明：
+ * dispatchIndex 是关键的幂等控制字段。每次派单时，Redis 中存储当前索引值。
+ * 延迟消息携带发送时的 dispatchIndex，15s 后到期时：
+ * - 若司机已接单，订单状态已变更，步骤 2 会过滤
+ * - 若已进行了新一轮重试（index 已更新），步骤 1 会过滤
+ * 两层保护确保同一轮派单的超时消息不会触发重复重试。
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class RetryConsumer {
+
+    private final OrderMapper orderMapper;
+    private final DriverMapper driverMapper;
+    private final OrderDispatchLogMapper dispatchLogMapper;
+    private final RabbitTemplate rabbitTemplate;
+    private final StringRedisTemplate redisTemplate;
+    private final ObjectMapper objectMapper;
+
+    /**
+     * 消费超时重试消息
+     *
+     * 消息体格式（Map）：
+     * {
+     *   "orderId":       Long,
+     *   "dispatchIndex": Integer  // 发送此延迟消息时的派单索引
+     * }
+     */
+    @RabbitListener(queues = RabbitMqConfig.DISPATCH_RETRY_QUEUE)
+    public void onRetry(Message message, Channel channel) throws IOException {
+        long deliveryTag = message.getMessageProperties().getDeliveryTag();
+        Map<String, Object> body;
+        try {
+            body = objectMapper.readValue(message.getBody(), new TypeReference<>() {});
+        } catch (Exception e) {
+            log.error("重试消息解析失败，NACK 进死信", e);
+            channel.basicNack(deliveryTag, false, false);
+            return;
+        }
+
+        Long orderId = ((Number) body.get("orderId")).longValue();
+        int msgDispatchIndex = ((Number) body.get("dispatchIndex")).intValue();
+
+        try {
+            doRetry(orderId, msgDispatchIndex);
+            channel.basicAck(deliveryTag, false);
+        } catch (Exception e) {
+            log.error("重试处理失败 orderId={}", orderId, e);
+            channel.basicNack(deliveryTag, false, false);
+        }
+    }
+
+    /**
+     * 核心重试逻辑
+     *
+     * @param orderId          订单 ID
+     * @param msgDispatchIndex 消息中携带的派单索引（发送延迟消息时的快照值）
+     */
+    private void doRetry(Long orderId, int msgDispatchIndex) {
+        // 5.5.1 幂等校验：比较消息中的 dispatchIndex 与 Redis 当前索引
+        String indexKey = "order:dispatch:index:" + orderId;
+        String currentIndexStr = redisTemplate.opsForValue().get(indexKey);
+
+        if (currentIndexStr == null) {
+            // Redis 中无索引记录，说明候选列表已过期或订单已结束，忽略
+            log.info("派单索引 key 不存在，忽略重试 orderId={}", orderId);
+            return;
+        }
+
+        int currentIndex = Integer.parseInt(currentIndexStr);
+        if (msgDispatchIndex != currentIndex) {
+            // 索引不一致：说明已有新一轮派单（index 已更新），此消息是过期的超时通知，忽略
+            // 这是幂等保证的核心：同一轮派单只处理一次超时
+            log.info("dispatchIndex 不一致，忽略过期重试 orderId={} msgIndex={} currentIndex={}",
+                    orderId, msgDispatchIndex, currentIndex);
+            return;
+        }
+
+        // 5.5.2 订单状态校验
+        Order order = orderMapper.selectById(orderId);
+        if (order == null || order.getStatus() != OrderStatus.DISPATCHING) {
+            log.info("订单不在派单中状态，忽略重试 orderId={} status={}",
+                    orderId, order != null ? order.getStatus() : "null");
+            return;
+        }
+
+        // 5.5.3 从 Redis 候选列表取下一位司机
+        String candidatesKey = "order:candidates:" + orderId;
+        String candidatesJson = redisTemplate.opsForValue().get(candidatesKey);
+
+        if (candidatesJson == null) {
+            // 候选列表已过期，直接取消
+            log.warn("候选列表已过期，直接取消 orderId={}", orderId);
+            sendCancelMessage(orderId, "派单超时，候选列表已过期");
+            return;
+        }
+
+        List<Long> candidates;
+        try {
+            candidates = objectMapper.readValue(candidatesJson, new TypeReference<>() {});
+        } catch (Exception e) {
+            log.error("候选列表解析失败 orderId={}", orderId, e);
+            sendCancelMessage(orderId, "派单异常");
+            return;
+        }
+
+        int nextIndex = currentIndex + 1;
+
+        // 5.5.4 候选列表耗尽，发消息到 cancel.queue
+        if (nextIndex >= candidates.size()) {
+            log.info("候选列表耗尽，触发自动取消 orderId={} totalCandidates={}", orderId, candidates.size());
+            saveDispatchLog(orderId, null, DispatchAction.TIMEOUT, "候选列表耗尽，自动取消");
+            sendCancelMessage(orderId, "附近司机均未接单");
+            return;
+        }
+
+        // 取下一位候选司机
+        Long nextDriverId = candidates.get(nextIndex);
+
+        // 更新 Redis 中的当前派单索引
+        redisTemplate.opsForValue().set(indexKey, String.valueOf(nextIndex),
+                Duration.ofMinutes(10));
+
+        // 推送新订单通知给下一位司机
+        pushOrderToDriver(orderId, nextDriverId);
+
+        // 更新司机派单统计
+        updateDriverDispatchStats(nextDriverId);
+
+        // 记录派单日志
+        saveDispatchLog(orderId, nextDriverId, DispatchAction.DISPATCHED,
+                "重试派单，index=" + nextIndex);
+
+        // 发送新的延迟消息（携带新的 dispatchIndex）
+        sendDelayMessage(orderId, nextIndex);
+
+        log.info("重试派单成功 orderId={} nextDriverId={} index={}", orderId, nextDriverId, nextIndex);
+    }
+
+    /** 推送新订单通知给司机（写 Redis，司机端轮询） */
+    private void pushOrderToDriver(Long orderId, Long driverId) {
+        String key = "driver:pending:order:" + driverId;
+        redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(20));
+    }
+
+    /** 更新司机派单统计 */
+    private void updateDriverDispatchStats(Long driverId) {
+        var driver = driverMapper.selectById(driverId);
+        if (driver != null) {
+            driver.setLastDispatchAt(LocalDateTime.now());
+            driver.setDispatchCountToday(
+                    driver.getDispatchCountToday() != null ? driver.getDispatchCountToday() + 1 : 1);
+            driverMapper.updateById(driver);
+        }
+    }
+
+    /** 发送延迟消息 */
+    private void sendDelayMessage(Long orderId, int dispatchIndex) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
+        msg.put("dispatchIndex", dispatchIndex);
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DELAY_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
+                msg
+        );
+    }
+
+    /** 发送取消消息 */
+    private void sendCancelMessage(Long orderId, String reason) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
+        msg.put("reason", reason);
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_CANCEL,
+                msg
+        );
+    }
+
+    /** 记录派单日志 */
+    private void saveDispatchLog(Long orderId, Long driverId, DispatchAction action, String remark) {
+        OrderDispatchLog log = new OrderDispatchLog();
+        log.setOrderId(orderId);
+        log.setDriverId(driverId);
+        log.setAction(action);
+        log.setRemark(remark);
+        log.setCreatedAt(LocalDateTime.now());
+        dispatchLogMapper.insert(log);
+    }
+}

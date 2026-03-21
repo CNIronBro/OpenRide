@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DiDi 出行</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #f5f5f5; max-width: 390px; margin: 0 auto; }
+  .screen { display: none; min-height: 100vh; }
+  .screen.active { display: flex; flex-direction: column; }
+
+  .nav { background: #ff6b00; color: #fff; padding: 16px; font-size: 18px; font-weight: bold; display: flex; align-items: center; gap: 12px; }
+  .nav .back { cursor: pointer; font-size: 20px; }
+
+  /* 登录页 */
+  #login { background: #fff; justify-content: center; align-items: center; padding: 40px 24px; }
+  .logo { font-size: 48px; margin-bottom: 8px; }
+  .logo-text { font-size: 28px; font-weight: bold; color: #ff6b00; margin-bottom: 40px; }
+  .form-group { width: 100%; margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 14px; color: #666; margin-bottom: 6px; }
+  .form-group input { width: 100%; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 16px; }
+  .btn { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+  .btn-primary { background: #ff6b00; color: #fff; }
+  .btn-secondary { background: #f0f0f0; color: #333; margin-top: 12px; }
+  .hint { font-size: 12px; color: #999; margin-top: 8px; }
+  .err-msg { color: #e91e63; font-size: 13px; margin-top: 8px; min-height: 18px; }
+
+  /* 主页 */
+  #home { background: #fff; }
+  .map-area { background: linear-gradient(135deg, #e8f4fd, #d0e8f7); height: 260px; position: relative; display: flex; align-items: center; justify-content: center; }
+  .map-placeholder { text-align: center; color: #666; }
+  .map-placeholder .icon { font-size: 48px; }
+  .nearby-count { position: absolute; top: 12px; right: 12px; background: rgba(255,107,0,0.9); color: #fff; border-radius: 12px; padding: 4px 10px; font-size: 12px; }
+  .driver-dot { position: absolute; width: 12px; height: 12px; background: #ff6b00; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
+  .order-panel { padding: 20px; flex: 1; }
+  .order-panel h3 { font-size: 16px; color: #333; margin-bottom: 16px; }
+  .location-input { border: 1px solid #eee; border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
+  .loc-row { display: flex; align-items: center; padding: 12px 16px; gap: 12px; }
+  .loc-row:first-child { border-bottom: 1px solid #f0f0f0; }
+  .loc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .loc-dot.start { background: #4caf50; }
+  .loc-dot.end { background: #ff6b00; }
+  .loc-row input { border: none; outline: none; flex: 1; font-size: 15px; }
+  .price-estimate { background: #fff8f0; border: 1px solid #ffe0b2; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+  .price-estimate .price { font-size: 22px; font-weight: bold; color: #ff6b00; }
+  .price-estimate .detail { font-size: 12px; color: #999; text-align: right; }
+
+  /* 历史行程 */
+  #history { background: #f5f5f5; }
+  .order-list { padding: 12px; flex: 1; overflow-y: auto; }
+  .order-card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+  .order-card .order-header { display: flex; justify-content: space-between; margin-bottom: 12px; }
+  .order-card .order-date { font-size: 13px; color: #999; }
+  .order-card .order-status { font-size: 13px; padding: 2px 8px; border-radius: 10px; }
+  .status-done { background: #e8f5e9; color: #4caf50; }
+  .status-cancel { background: #fce4ec; color: #e91e63; }
+  .status-active { background: #e3f2fd; color: #1976d2; }
+  .order-route { margin-bottom: 12px; }
+  .route-item { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
+  .route-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .order-footer { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #f0f0f0; padding-top: 12px; }
+  .order-footer .amount { font-size: 18px; font-weight: bold; color: #ff6b00; }
+  .re-order { font-size: 13px; color: #ff6b00; cursor: pointer; }
+  .empty-tip { text-align: center; color: #999; padding: 60px 0; font-size: 14px; }
+
+  /* 底部 tab */
+  .tab-bar { display: flex; background: #fff; border-top: 1px solid #eee; padding: 8px 0; }
+  .tab-item { flex: 1; text-align: center; cursor: pointer; padding: 4px; }
+  .tab-item .tab-icon { font-size: 22px; }
+  .tab-item .tab-label { font-size: 11px; color: #999; }
+  .tab-item.active .tab-label { color: #ff6b00; }
+
+  /* 等待接单页 */
+  #waiting { background: #fff; }
+  .waiting-hero { background: linear-gradient(135deg, #ff6b00, #ff9a3c); padding: 40px 24px; text-align: center; color: #fff; }
+  .waiting-hero .spin { font-size: 56px; animation: spin 2s linear infinite; display: inline-block; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .waiting-hero h2 { font-size: 22px; margin: 16px 0 8px; }
+  .waiting-hero p { font-size: 14px; opacity: 0.85; }
+  .waiting-info { padding: 24px; }
+  .info-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #f0f0f0; }
+  .info-row:last-child { border-bottom: none; }
+  .info-label { font-size: 14px; color: #666; }
+  .info-value { font-size: 15px; font-weight: 500; color: #333; }
+  .info-value.highlight { color: #ff6b00; }
+  .cancel-btn { margin: 0 24px 24px; }
+
+  /* 行程中页 */
+  #intrip { background: #fff; }
+  .trip-map { background: linear-gradient(135deg, #e8f4fd, #d0e8f7); height: 200px; display: flex; align-items: center; justify-content: center; }
+  .driver-card { margin: 16px; background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); padding: 16px; }
+  .driver-card .driver-info { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .driver-avatar { width: 48px; height: 48px; background: #ff6b00; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 22px; }
+  .driver-name { font-size: 16px; font-weight: bold; }
+  .driver-meta { font-size: 13px; color: #666; margin-top: 2px; }
+  .driver-rating { color: #ff6b00; font-size: 13px; }
+  .trip-steps { }
+  .step { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
+  .step-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .step-dot.done { background: #4caf50; }
+  .step-dot.active { background: #ff6b00; box-shadow: 0 0 0 3px rgba(255,107,0,0.2); }
+  .step-dot.pending { background: #ddd; }
+  .step-text { font-size: 14px; }
+  .step-text.active { color: #ff6b00; font-weight: 500; }
+  .step-text.done { color: #4caf50; }
+  .step-text.pending { color: #999; }
+  .trip-route { margin: 0 16px 16px; background: #f9f9f9; border-radius: 8px; padding: 12px 16px; }
+  .trip-route .route-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #555; padding: 4px 0; }
+</style>
+</head>
+<body>
+
+<!-- ===== 登录页 ===== -->
+<div id="login" class="screen active">
+  <div class="logo">🚗</div>
+  <div class="logo-text">DiDi 出行</div>
+  <div class="form-group">
+    <label>手机号</label>
+    <input type="tel" id="phone" placeholder="请输入手机号" value="13800000001">
+  </div>
+  <div class="form-group">
+    <label>验证码</label>
+    <div style="display:flex;gap:8px">
+      <input type="text" id="code" placeholder="请输入验证码" value="123456" style="flex:1"
+             onkeydown="if(event.key==='Enter')doLogin()">
+      <button class="btn btn-secondary" style="width:auto;padding:12px 16px;font-size:14px"
+              onclick="alert('验证码已发送（mock: 123456）')">获取验证码</button>
+    </div>
+  </div>
+  <p class="hint">测试账号：13800000001，验证码：123456</p>
+  <div class="err-msg" id="login-err"></div>
+  <button class="btn btn-primary" style="margin-top:8px" onclick="doLogin()">登 录</button>
+</div>
+
+<!-- ===== 主页 - 叫车 ===== -->
+<div id="home" class="screen">
+  <div class="map-area">
+    <div class="map-placeholder">
+      <div class="icon">🗺️</div>
+      <div style="font-size:14px;margin-top:8px">地图（mock）</div>
+    </div>
+    <div class="nearby-count" id="nearby-count">附近司机加载中...</div>
+    <div class="driver-dot" style="top:30%;left:40%"></div>
+    <div class="driver-dot" style="top:55%;left:65%"></div>
+    <div class="driver-dot" style="top:70%;left:30%"></div>
+  </div>
+  <div class="order-panel">
+    <h3 id="home-greeting">你好 👋 去哪儿？</h3>
+    <div class="location-input">
+      <div class="loc-row">
+        <div class="loc-dot start"></div>
+        <input type="text" id="origin-addr" value="北京市朝阳区望京街道" placeholder="起点">
+      </div>
+      <div class="loc-row">
+        <div class="loc-dot end"></div>
+        <input type="text" id="dest-addr" placeholder="请输入目的地" value="北京首都国际机场 T3">
+      </div>
+    </div>
+    <div class="price-estimate" id="price-box" style="display:none">
+      <div>
+        <div style="font-size:13px;color:#666;margin-bottom:4px">预估费用</div>
+        <div class="price" id="est-price">-</div>
+      </div>
+      <div class="detail" id="est-detail"></div>
+    </div>
+    <button class="btn btn-secondary" onclick="estimatePrice()" style="margin-bottom:10px">预估价格</button>
+    <button class="btn btn-primary" onclick="doCreateOrder()">呼叫快车</button>
+  </div>
+  <div class="tab-bar">
+    <div class="tab-item active" onclick="showScreen('home')">
+      <div class="tab-icon">🏠</div>
+      <div class="tab-label">叫车</div>
+    </div>
+    <div class="tab-item" onclick="showScreen('history');loadHistory()">
+      <div class="tab-icon">📋</div>
+      <div class="tab-label">行程</div>
+    </div>
+    <div class="tab-item">
+      <div class="tab-icon">👤</div>
+      <div class="tab-label">我的</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 历史行程 ===== -->
+<div id="history" class="screen">
+  <div class="nav">我的行程</div>
+  <div class="order-list" id="order-list">
+    <div class="empty-tip">加载中...</div>
+  </div>
+  <div class="tab-bar">
+    <div class="tab-item" onclick="showScreen('home')">
+      <div class="tab-icon">🏠</div>
+      <div class="tab-label">叫车</div>
+    </div>
+    <div class="tab-item active">
+      <div class="tab-icon">📋</div>
+      <div class="tab-label">行程</div>
+    </div>
+    <div class="tab-item">
+      <div class="tab-icon">👤</div>
+      <div class="tab-label">我的</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 等待接单页 ===== -->
+<div id="waiting" class="screen">
+  <div class="waiting-hero">
+    <div class="spin">🚗</div>
+    <h2>正在为您派单...</h2>
+    <p id="waiting-status-text">正在寻找附近司机</p>
+  </div>
+  <div class="waiting-info">
+    <div class="info-row">
+      <span class="info-label">起点</span>
+      <span class="info-value" id="w-origin">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">终点</span>
+      <span class="info-value" id="w-dest">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">预估费用</span>
+      <span class="info-value highlight" id="w-price">-</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">附近司机</span>
+      <span class="info-value" id="w-nearby">查询中...</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">订单状态</span>
+      <span class="info-value" id="w-order-status">派单中</span>
+    </div>
+  </div>
+  <div class="cancel-btn">
+    <button class="btn btn-secondary" onclick="cancelWaiting()">取消叫车</button>
+  </div>
+</div>
+
+<!-- ===== 行程中页 ===== -->
+<div id="intrip" class="screen">
+  <div class="nav">
+    <span>行程中</span>
+  </div>
+  <div class="trip-map">
+    <div style="text-align:center;color:#666">
+      <div style="font-size:40px">🗺️</div>
+      <div style="font-size:13px;margin-top:6px">导航中（mock）</div>
+    </div>
+  </div>
+  <div class="driver-card">
+    <div class="driver-info">
+      <div class="driver-avatar">👨</div>
+      <div>
+        <div class="driver-name" id="trip-driver-name">-</div>
+        <div class="driver-meta" id="trip-driver-car">-</div>
+        <div class="driver-rating" id="trip-driver-rating">⭐ -</div>
+      </div>
+    </div>
+    <!-- 行程步骤条：根据订单状态动态高亮 -->
+    <div class="trip-steps" id="trip-steps">
+      <div class="step">
+        <div class="step-dot pending" id="step-dot-accepted"></div>
+        <span class="step-text pending" id="step-text-accepted">司机已接单</span>
+      </div>
+      <div class="step">
+        <div class="step-dot pending" id="step-dot-picking"></div>
+        <span class="step-text pending" id="step-text-picking">司机已到达接客点</span>
+      </div>
+      <div class="step">
+        <div class="step-dot pending" id="step-dot-intrip"></div>
+        <span class="step-text pending" id="step-text-intrip">行程中</span>
+      </div>
+      <div class="step">
+        <div class="step-dot pending" id="step-dot-finished"></div>
+        <span class="step-text pending" id="step-text-finished">已到达目的地</span>
+      </div>
+    </div>
+  </div>
+  <div class="trip-route">
+    <div class="route-item"><span style="color:#4caf50">●</span> <span id="trip-origin">-</span></div>
+    <div class="route-item"><span style="color:#ff6b00">●</span> <span id="trip-dest">-</span></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let currentUserId = null;
+let currentOrderId = null;   // 当前进行中的订单 ID
+let pollTimer = null;        // 订单状态轮询定时器
+
+// ---- 通用请求 ----
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, {
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  return res.json();
+}
+
+// ---- 页面切换 ----
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// ---- 登录 ----
+async function doLogin() {
+  const phone = document.getElementById('phone').value.trim();
+  const code  = document.getElementById('code').value.trim();
+  document.getElementById('login-err').textContent = '';
+
+  const r = await api('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ phone, code, role: 'PASSENGER' })
+  });
+
+  if (r.code === 200) {
+    currentUserId = r.data.userId;
+    document.getElementById('home-greeting').textContent = `你好 👋 去哪儿？`;
+    showScreen('home');
+    loadNearbyCount();
+  } else {
+    document.getElementById('login-err').textContent = r.message || '登录失败';
+  }
+}
+
+// ---- 附近司机数量（mock 坐标：望京） ----
+async function loadNearbyCount() {
+  const r = await api('/dispatch/nearby?lat=39.99&lng=116.48&radius=5&city=default');
+  const el = document.getElementById('nearby-count');
+  if (r.code === 200) {
+    el.textContent = `附近 ${r.data.length} 位司机`;
+  } else {
+    el.textContent = '附近司机查询失败';
+  }
+}
+
+// ---- 预估价格（阶段 9 实现真实计价，此处 mock） ----
+function estimatePrice() {
+  const dest = document.getElementById('dest-addr').value.trim();
+  if (!dest) { alert('请输入目的地'); return; }
+  // mock：固定预估，阶段 9 替换为 GET /order/estimate
+  document.getElementById('price-box').style.display = 'flex';
+  document.getElementById('est-price').textContent = '¥ 68 - 82';
+  document.getElementById('est-detail').innerHTML = '<div>约 28km</div><div>约 45分钟</div>';
+}
+
+// ---- 下单 ----
+async function doCreateOrder() {
+  if (!currentUserId) { alert('请先登录'); return; }
+  const originAddr = document.getElementById('origin-addr').value.trim();
+  const destAddr   = document.getElementById('dest-addr').value.trim();
+  if (!destAddr) { alert('请输入目的地'); return; }
+
+  // mock 坐标（望京 → 首都机场）
+  const body = {
+    originLat: 39.99, originLng: 116.48, originAddr,
+    destLat: 40.08,   destLng: 116.60,   destAddr,
+    estimatedPrice: 75.00,
+    city: 'default'
+  };
+
+  const r = await api('/order/create', { method: 'POST', body: JSON.stringify(body) });
+  if (r.code !== 200) { alert('下单失败：' + r.message); return; }
+
+  currentOrderId = r.data.id;
+
+  // 填充等待页信息
+  document.getElementById('w-origin').textContent = originAddr;
+  document.getElementById('w-dest').textContent   = destAddr;
+  document.getElementById('w-price').textContent  = `¥${r.data.estimatedPrice || 75}`;
+
+  // 查询附近司机数
+  api('/dispatch/nearby?lat=39.99&lng=116.48&radius=5&city=default').then(nr => {
+    document.getElementById('w-nearby').textContent =
+        nr.code === 200 ? `${nr.data.length} 位` : '-';
+  });
+
+  showScreen('waiting');
+  startPolling();
+}
+
+// ---- 取消等待 ----
+function cancelWaiting() {
+  stopPolling();
+  currentOrderId = null;
+  showScreen('home');
+}
+
+// ---- 订单状态轮询（每 3s 一次） ----
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(pollOrderStatus, 3000);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+/**
+ * 轮询订单状态，根据状态切换页面
+ *
+ * 状态流转：
+ *   DISPATCHING → 继续等待
+ *   ACCEPTED / PICKING / IN_TRIP → 跳转行程中页
+ *   FINISHED → 跳转历史行程页（阶段 9 跳转支付页）
+ *   CANCELLED → 提示取消，返回主页
+ */
+async function pollOrderStatus() {
+  if (!currentOrderId) { stopPolling(); return; }
+
+  const r = await api(`/order/${currentOrderId}`);
+  if (r.code !== 200) return;
+
+  const order = r.data;
+  const statusMap = {
+    DISPATCHING: '派单中',
+    ACCEPTED:    '司机已接单',
+    PICKING:     '司机前往接客点',
+    IN_TRIP:     '行程中',
+    FINISHED:    '已完成',
+    CANCELLED:   '已取消',
+  };
+  document.getElementById('w-order-status').textContent = statusMap[order.status] || order.status;
+
+  if (order.status === 'ACCEPTED' || order.status === 'PICKING' || order.status === 'IN_TRIP') {
+    stopPolling();
+    showTripScreen(order);
+    // 行程中继续轮询（更新步骤条）
+    pollTimer = setInterval(() => pollTripStatus(order.id), 5000);
+  } else if (order.status === 'FINISHED') {
+    stopPolling();
+    alert('行程已结束！感谢您的乘坐。');
+    showScreen('history');
+    loadHistory();
+  } else if (order.status === 'CANCELLED') {
+    stopPolling();
+    alert('很抱歉，附近暂无可用司机，订单已自动取消。');
+    currentOrderId = null;
+    showScreen('home');
+  }
+}
+
+// ---- 显示行程中页 ----
+async function showTripScreen(order) {
+  // 填充路线信息
+  document.getElementById('trip-origin').textContent = order.originAddr || '-';
+  document.getElementById('trip-dest').textContent   = order.destAddr   || '-';
+
+  // 若有司机信息，查询司机详情
+  if (order.driverId) {
+    // 通过订单中的 driverId 展示司机信息（阶段 6 完善司机端后可查询真实数据）
+    document.getElementById('trip-driver-name').textContent = `司机 #${order.driverId}`;
+    document.getElementById('trip-driver-car').textContent  = '车牌信息加载中...';
+    document.getElementById('trip-driver-rating').textContent = '⭐ -';
+  }
+
+  updateTripSteps(order.status);
+  showScreen('intrip');
+}
+
+// ---- 轮询行程状态（更新步骤条） ----
+async function pollTripStatus(orderId) {
+  const r = await api(`/order/${orderId}`);
+  if (r.code !== 200) return;
+  const order = r.data;
+  updateTripSteps(order.status);
+
+  if (order.status === 'FINISHED') {
+    stopPolling();
+    alert('行程已结束！感谢您的乘坐。');
+    showScreen('history');
+    loadHistory();
+  } else if (order.status === 'CANCELLED') {
+    stopPolling();
+    alert('行程已取消。');
+    showScreen('home');
+  }
+}
+
+/**
+ * 根据订单状态更新行程步骤条样式
+ *
+ * 步骤顺序：ACCEPTED → PICKING → IN_TRIP → FINISHED
+ * 已完成的步骤显示绿色，当前步骤显示橙色高亮，未到达的步骤显示灰色
+ */
+function updateTripSteps(status) {
+  const steps = ['accepted', 'picking', 'intrip', 'finished'];
+  const statusOrder = { ACCEPTED: 0, PICKING: 1, IN_TRIP: 2, FINISHED: 3 };
+  const currentIdx = statusOrder[status] ?? -1;
+
+  steps.forEach((step, idx) => {
+    const dot  = document.getElementById(`step-dot-${step}`);
+    const text = document.getElementById(`step-text-${step}`);
+    if (!dot || !text) return;
+
+    dot.className  = 'step-dot';
+    text.className = 'step-text';
+
+    if (idx < currentIdx) {
+      dot.classList.add('done');
+      text.classList.add('done');
+    } else if (idx === currentIdx) {
+      dot.classList.add('active');
+      text.classList.add('active');
+    } else {
+      dot.classList.add('pending');
+      text.classList.add('pending');
+    }
+  });
+}
+
+// ---- 历史行程 ----
+async function loadHistory() {
+  if (!currentUserId) return;
+  const r = await api('/passenger/orders?page=1&size=20');
+  const el = document.getElementById('order-list');
+
+  if (r.code !== 200 || !r.data || r.data.records.length === 0) {
+    el.innerHTML = '<div class="empty-tip">暂无行程记录</div>';
+    return;
+  }
+
+  const statusLabel = {
+    FINISHED: ['已完成', 'status-done'],
+    CANCELLED: ['已取消', 'status-cancel'],
+    IN_TRIP: ['行程中', 'status-active'],
+    ACCEPTED: ['已接单', 'status-active'],
+    PICKING: ['前往接客', 'status-active'],
+    DISPATCHING: ['派单中', 'status-active'],
+    PENDING: ['待处理', 'status-active'],
+  };
+
+  el.innerHTML = r.data.records.map(o => {
+    const [label, cls] = statusLabel[o.status] || ['未知', ''];
+    const amount = o.actualPrice ? `¥${o.actualPrice}` : (o.estimatedPrice ? `预估¥${o.estimatedPrice}` : '-');
+    const date = (o.createdAt || '').slice(0, 16);
+    return `
+      <div class="order-card">
+        <div class="order-header">
+          <span class="order-date">${date}</span>
+          <span class="order-status ${cls}">${label}</span>
+        </div>
+        <div class="order-route">
+          <div class="route-item"><div class="dot" style="background:#4caf50"></div>${o.originAddr || '-'}</div>
+          <div class="route-item"><div class="dot" style="background:#ff6b00"></div>${o.destAddr || '-'}</div>
+        </div>
+        <div class="order-footer">
+          <span class="amount">${amount}</span>
+          <span class="re-order" onclick="rebook('${o.originAddr}','${o.destAddr}')">再叫一次</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function rebook(origin, dest) {
+  document.getElementById('origin-addr').value = origin;
+  document.getElementById('dest-addr').value = dest;
+  showScreen('home');
+}
+
+// ---- 初始化：检查登录态 ----
+api('/passenger/profile').then(r => {
+  if (r.code === 200) {
+    currentUserId = r.data.id;
+    showScreen('home');
+    loadNearbyCount();
+  }
+}).catch(() => {});
+</script>
+</body>
+</html>
