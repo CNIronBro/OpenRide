@@ -1,14 +1,12 @@
 package com.ironbro.didi.controller;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.common.Result;
 import com.ironbro.didi.common.SessionUtils;
 import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.entity.User;
-import com.ironbro.didi.mapper.OrderMapper;
-import com.ironbro.didi.mapper.UserMapper;
+import com.ironbro.didi.service.PassengerService;
 import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -21,15 +19,14 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class PassengerController {
 
-    private final UserMapper  userMapper;
-    private final OrderMapper orderMapper;
+    private final PassengerService passengerService;
 
     /** 获取乘客个人信息 */
     @GetMapping("/profile")
     public Result<User> profile(HttpSession session) {
         Long userId = SessionUtils.getUserId(session);
         if (userId == null) throw new BizException(401, "未登录");
-        return Result.ok(userMapper.selectById(userId));
+        return Result.ok(passengerService.getProfile(userId));
     }
 
     /** 历史行程列表（按下单时间倒序） */
@@ -40,11 +37,6 @@ public class PassengerController {
             HttpSession session) {
         Long userId = SessionUtils.getUserId(session);
         if (userId == null) throw new BizException(401, "未登录");
-
-        return Result.ok(orderMapper.selectPage(
-                new Page<>(page, size),
-                new LambdaQueryWrapper<Order>()
-                        .eq(Order::getPassengerId, userId)
-                        .orderByDesc(Order::getCreatedAt)));
+        return Result.ok(passengerService.getOrders(userId, page, size));
     }
 }
