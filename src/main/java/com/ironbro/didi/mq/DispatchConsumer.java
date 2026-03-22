@@ -19,6 +19,8 @@ import com.ironbro.didi.service.DriverLocationService;
 import com.rabbitmq.client.Channel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -33,6 +35,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 派单消费者
@@ -45,9 +48,14 @@ import java.util.Map;
  * 5. 推送新订单通知给最优司机（写 Redis，司机端轮询）
  * 6. 发送延迟消息到 dispatch.delay.queue（TTL=15s），消息体携带 orderId + dispatchIndex=0
  *
- * 幂等说明：
- * 阶段 7 将在此处加 Redisson tryLock（key=lock:dispatch:{orderId}），
- * 防止同一派单消息被多个消费者实例并发消费。当前阶段暂不加锁。
+ * 幂等说明（阶段 7 实现）：
+ * 消费前用 Redisson tryLock（key=lock:dispatch:{orderId}），防止同一订单的派单消息
+ * 被多个消费者实例并发消费两次（MQ 消息重投或多实例部署场景）。
+ * leaseTime=30s，足够覆盖一次完整派单流程，超时自动释放防止死锁。
+ *
+ * 重复推送防护（阶段 7 实现）：
+ * 推送前检查 Redis Set（key=order:dispatched:drivers:{orderId}），
+ * 若司机已在集合中则跳过，防止同一司机被重复推送同一订单。
  *
  * 消费失败处理：
  * 捕获异常后 NACK（requeue=false），消息路由到 dispatch.dlx → dispatch.dlq，
@@ -75,6 +83,7 @@ public class DispatchConsumer {
     private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final RedissonClient redissonClient;
 
     /**
      * 消费派单消息
@@ -108,13 +117,32 @@ public class DispatchConsumer {
         double originLng = ((Number) body.get("originLng")).doubleValue();
         String city = (String) body.getOrDefault("city", "default");
 
+        // 7.1 派单幂等锁：防止同一订单的派单消息被多个消费者实例并发消费两次
+        // 场景：MQ 消息重投（网络抖动导致 ACK 未到达 Broker）或多实例部署时消息被重复投递
+        // tryLock(waitTime=0)：不等待，立即返回。若锁已被持有，说明另一实例正在处理，直接 ACK 跳过
+        // leaseTime=30s：足够覆盖一次完整派单流程（GEO 召回 + 评分 + Redis 写入 + MQ 发送），超时自动释放防死锁
+        String lockKey = "lock:dispatch:" + orderId;
+        RLock lock = redissonClient.getLock(lockKey);
+        boolean locked = false;
         try {
+            locked = lock.tryLock(0, 30, TimeUnit.SECONDS);
+            if (!locked) {
+                // 未获取到锁：说明另一实例正在处理此订单的派单，直接 ACK 跳过（幂等）
+                log.info("派单幂等锁未获取，跳过重复消费 orderId={}", orderId);
+                channel.basicAck(deliveryTag, false);
+                return;
+            }
             doDispatch(orderId, originLat, originLng, city);
             channel.basicAck(deliveryTag, false);
         } catch (Exception e) {
             log.error("派单处理失败 orderId={}", orderId, e);
             // 消费失败 NACK，不重入队列，路由到死信队列
             channel.basicNack(deliveryTag, false, false);
+        } finally {
+            // 确保锁在持有时才释放，避免释放他人的锁
+            if (locked && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
@@ -232,15 +260,35 @@ public class DispatchConsumer {
      * 写入 Redis，司机端通过轮询 GET /driver/pending-order 读取。
      * key=driver:pending:order:{driverId}，value=orderId，TTL=20s（略大于 15s 派单超时）
      *
+     * 重复推送防护（7.3）：
+     * 推送前检查 Redis Set（key=order:dispatched:drivers:{orderId}），
+     * 若司机已在集合中则跳过，防止同一司机被重复推送同一订单。
+     * 使用 SADD 的原子性保证"检查+写入"不存在竞态。
+     *
      * 设计意图：
      * 不使用 WebSocket 推送（阶段 6 约束），司机端每 2s 轮询一次此 key，
      * 有值则弹出新订单弹窗，15s 倒计时内接单或忽略。
+     *
+     * @return true=推送成功，false=该司机已被推送过（跳过）
      */
-    private void pushOrderToDriver(Long orderId, Long driverId) {
+    private boolean pushOrderToDriver(Long orderId, Long driverId) {
+        // 7.3 重复推送防护：SADD 返回 1 表示新增成功（未推送过），返回 0 表示已存在（已推送过）
+        // SADD 是原子操作，天然防止并发下的重复写入，无需额外加锁
+        String dispatchedKey = "order:dispatched:drivers:" + orderId;
+        Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
+        redisTemplate.expire(dispatchedKey, Duration.ofMinutes(10));
+
+        if (added == null || added == 0) {
+            // 该司机已被推送过此订单，跳过（防止重复弹窗）
+            log.info("司机已被推送过此订单，跳过 driverId={} orderId={}", driverId, orderId);
+            return false;
+        }
+
         String key = "driver:pending:order:" + driverId;
         // TTL=20s，略大于 15s 派单超时，保证司机端有足够时间轮询到
         redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(20));
         log.debug("推送订单通知 driverId={} orderId={}", driverId, orderId);
+        return true;
     }
 
     /**

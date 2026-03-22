@@ -13,6 +13,8 @@ import com.ironbro.didi.mapper.OrderMapper;
 import com.rabbitmq.client.Channel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -25,6 +27,7 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 派单超时重试消费者
@@ -45,6 +48,11 @@ import java.util.Map;
  * - 若司机已接单，订单状态已变更，步骤 2 会过滤
  * - 若已进行了新一轮重试（index 已更新），步骤 1 会过滤
  * 两层保护确保同一轮派单的超时消息不会触发重复重试。
+ *
+ * 补偿幂等锁（阶段 7）：
+ * 消费前用 Redisson tryLock（key=lock:compensate:{orderId}），防止同一超时消息
+ * 被多个消费者实例并发处理（多实例部署或 MQ 重投场景）。
+ * leaseTime=30s，超时自动释放防死锁。
  */
 @Slf4j
 @Component
@@ -57,6 +65,7 @@ public class RetryConsumer {
     private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    private final RedissonClient redissonClient;
 
     /**
      * 消费超时重试消息
@@ -82,12 +91,30 @@ public class RetryConsumer {
         Long orderId = ((Number) body.get("orderId")).longValue();
         int msgDispatchIndex = ((Number) body.get("dispatchIndex")).intValue();
 
+        // 7.2 补偿幂等锁：防止同一超时消息被多个消费者实例并发处理
+        // 场景：多实例部署时 MQ 消息被重复投递，或网络抖动导致 ACK 未到达 Broker 后重投
+        // tryLock(waitTime=0)：不等待，立即返回。若锁已被持有，说明另一实例正在处理，直接 ACK 跳过
+        // leaseTime=30s：足够覆盖一次完整重试流程，超时自动释放防死锁
+        // 注意：此锁与 dispatchIndex 幂等校验是两层独立保护，互为补充
+        String lockKey = "lock:compensate:" + orderId;
+        RLock lock = redissonClient.getLock(lockKey);
+        boolean locked = false;
         try {
+            locked = lock.tryLock(0, 30, TimeUnit.SECONDS);
+            if (!locked) {
+                log.info("补偿幂等锁未获取，跳过重复消费 orderId={}", orderId);
+                channel.basicAck(deliveryTag, false);
+                return;
+            }
             doRetry(orderId, msgDispatchIndex);
             channel.basicAck(deliveryTag, false);
         } catch (Exception e) {
             log.error("重试处理失败 orderId={}", orderId, e);
             channel.basicNack(deliveryTag, false, false);
+        } finally {
+            if (locked && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 
@@ -178,8 +205,22 @@ public class RetryConsumer {
         log.info("重试派单成功 orderId={} nextDriverId={} index={}", orderId, nextDriverId, nextIndex);
     }
 
-    /** 推送新订单通知给司机（写 Redis，司机端轮询） */
+    /** 推送新订单通知给司机（写 Redis，司机端轮询）
+     *
+     * 重复推送防护：SADD 原子操作检查司机是否已被推送过此订单，
+     * 防止重试链路中同一司机被重复推送（如候选列表循环或消息重投场景）。
+     */
     private void pushOrderToDriver(Long orderId, Long driverId) {
+        // 7.3 重复推送防护：与 DispatchConsumer 共用同一 Redis Set
+        String dispatchedKey = "order:dispatched:drivers:" + orderId;
+        Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
+        redisTemplate.expire(dispatchedKey, Duration.ofMinutes(10));
+
+        if (added == null || added == 0) {
+            log.info("司机已被推送过此订单（重试链路），跳过 driverId={} orderId={}", driverId, orderId);
+            return;
+        }
+
         String key = "driver:pending:order:" + driverId;
         redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(20));
     }
