@@ -68,4 +68,18 @@ public class DriverController {
         Long orderId = orderIdStr != null ? Long.parseLong(orderIdStr) : null;
         return Result.ok(Map.of("orderId", orderId != null ? orderId : ""));
     }
+
+    /**
+     * 9.9 司机收入统计
+     *
+     * 返回今日收入、本周收入、今日订单数、今日行程记录列表。
+     * 数据来源：order 表中 driver_id=? AND status=FINISHED 的已完成订单。
+     */
+    @GetMapping("/income")
+    public Result<DriverService.IncomeResult> income(HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "未登录");
+        Long driverId = driverService.getDriverByUserId(userId).getId();
+        return Result.ok(driverService.getIncome(driverId));
+    }
 }

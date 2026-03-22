@@ -107,6 +107,40 @@
   .step-text.pending { color: #999; }
   .trip-route { margin: 0 16px 16px; background: #f9f9f9; border-radius: 8px; padding: 12px 16px; }
   .trip-route .route-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #555; padding: 4px 0; }
+
+  /* 支付页 */
+  #payment { background: #f5f5f5; }
+  .payment-header { background: #ff6b00; padding: 32px 24px; text-align: center; color: #fff; }
+  .payment-header .pay-amount { font-size: 48px; font-weight: bold; }
+  .payment-header .pay-label { font-size: 14px; opacity: 0.85; margin-top: 4px; }
+  .bill-card { background: #fff; margin: 12px; border-radius: 12px; padding: 16px; }
+  .bill-title { font-size: 15px; font-weight: bold; color: #333; margin-bottom: 12px; }
+  .bill-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f5f5f5; font-size: 14px; }
+  .bill-row:last-child { border-bottom: none; }
+  .bill-row .label { color: #666; }
+  .bill-row .value { color: #333; }
+  .bill-row.total .label { font-weight: bold; color: #333; }
+  .bill-row.total .value { font-weight: bold; color: #ff6b00; font-size: 16px; }
+  .surge-badge { background: #fff3e0; color: #ff6b00; font-size: 11px; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
+  .pay-methods { background: #fff; margin: 0 12px 12px; border-radius: 12px; padding: 16px; }
+  .pay-method { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #f5f5f5; cursor: pointer; }
+  .pay-method:last-child { border-bottom: none; }
+  .pay-method input[type=radio] { accent-color: #ff6b00; width: 18px; height: 18px; }
+  .pay-method-icon { font-size: 24px; }
+  .pay-method-name { font-size: 15px; color: #333; }
+  .pay-btn-wrap { padding: 0 12px 24px; }
+
+  /* 评价页 */
+  #review { background: #f5f5f5; }
+  .review-card { background: #fff; margin: 12px; border-radius: 12px; padding: 20px; }
+  .review-section-title { font-size: 14px; color: #666; margin-bottom: 12px; }
+  .stars { display: flex; gap: 8px; margin-bottom: 20px; }
+  .star { font-size: 36px; cursor: pointer; transition: transform 0.1s; }
+  .star:hover { transform: scale(1.2); }
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  .tag { padding: 6px 14px; border: 1px solid #ddd; border-radius: 20px; font-size: 13px; color: #666; cursor: pointer; }
+  .tag.selected { border-color: #ff6b00; color: #ff6b00; background: #fff8f0; }
+  .review-textarea { width: 100%; border: 1px solid #eee; border-radius: 8px; padding: 12px; font-size: 14px; resize: none; height: 80px; }
 </style>
 </head>
 <body>
@@ -239,6 +273,75 @@
   </div>
 </div>
 
+<!-- ===== 支付页 ===== -->
+<div id="payment" class="screen">
+  <div class="payment-header">
+    <div class="pay-label">行程结束，请支付</div>
+    <div class="pay-amount" id="pay-amount">¥ -</div>
+    <div class="pay-label" id="pay-surge-tip" style="display:none"></div>
+  </div>
+  <div class="bill-card">
+    <div class="bill-title">账单明细</div>
+    <div class="bill-row"><span class="label">起步价</span><span class="value" id="bill-base">-</span></div>
+    <div class="bill-row"><span class="label">里程费</span><span class="value" id="bill-km">-</span></div>
+    <div class="bill-row"><span class="label">时长费</span><span class="value" id="bill-min">-</span></div>
+    <div class="bill-row" id="bill-surge-row" style="display:none">
+      <span class="label">高峰系数<span class="surge-badge" id="bill-surge-badge"></span></span>
+      <span class="value" id="bill-surge-val">-</span>
+    </div>
+    <div class="bill-row total"><span class="label">实付金额</span><span class="value" id="bill-total">-</span></div>
+  </div>
+  <div class="pay-methods">
+    <div class="pay-method">
+      <input type="radio" name="payMethod" value="wechat" checked>
+      <span class="pay-method-icon">💚</span>
+      <span class="pay-method-name">微信支付</span>
+    </div>
+    <div class="pay-method">
+      <input type="radio" name="payMethod" value="alipay">
+      <span class="pay-method-icon">💙</span>
+      <span class="pay-method-name">支付宝</span>
+    </div>
+    <div class="pay-method">
+      <input type="radio" name="payMethod" value="cash">
+      <span class="pay-method-icon">💵</span>
+      <span class="pay-method-name">现金支付</span>
+    </div>
+  </div>
+  <div class="pay-btn-wrap">
+    <button class="btn btn-primary" onclick="doPay()">确认支付</button>
+  </div>
+</div>
+
+<!-- ===== 评价页 ===== -->
+<div id="review" class="screen">
+  <div class="nav">行程评价</div>
+  <div class="review-card">
+    <div class="review-section-title">本次行程体验如何？</div>
+    <div class="stars" id="stars">
+      <span class="star" onclick="setStar(1)">⭐</span>
+      <span class="star" onclick="setStar(2)">⭐</span>
+      <span class="star" onclick="setStar(3)">⭐</span>
+      <span class="star" onclick="setStar(4)">⭐</span>
+      <span class="star" onclick="setStar(5)">⭐</span>
+    </div>
+    <div class="review-section-title">快速评价</div>
+    <div class="tags" id="review-tags">
+      <span class="tag" onclick="toggleTag(this)">驾驶平稳</span>
+      <span class="tag" onclick="toggleTag(this)">准时到达</span>
+      <span class="tag" onclick="toggleTag(this)">车内整洁</span>
+      <span class="tag" onclick="toggleTag(this)">服务热情</span>
+      <span class="tag" onclick="toggleTag(this)">路线合理</span>
+    </div>
+    <div class="review-section-title">文字评价（选填）</div>
+    <textarea class="review-textarea" id="review-text" placeholder="说说您的乘车体验..."></textarea>
+  </div>
+  <div style="padding: 0 12px 24px">
+    <button class="btn btn-primary" onclick="submitReview()">提交评价</button>
+    <button class="btn btn-secondary" onclick="skipReview()">跳过</button>
+  </div>
+</div>
+
 <!-- ===== 行程中页 ===== -->
 <div id="intrip" class="screen">
   <div class="nav">
@@ -290,6 +393,8 @@ const API = '';
 let currentUserId = null;
 let currentOrderId = null;   // 当前进行中的订单 ID
 let pollTimer = null;        // 订单状态轮询定时器
+let currentOrder = null;     // 当前订单完整数据（支付页使用）
+let reviewStar = 5;          // 评价星级，默认 5 星
 
 // ---- 通用请求 ----
 async function api(path, opts = {}) {
@@ -339,14 +444,25 @@ async function loadNearbyCount() {
   }
 }
 
-// ---- 预估价格（阶段 9 实现真实计价，此处 mock） ----
-function estimatePrice() {
+// ---- 预估价格（调用真实 GET /order/estimate 接口） ----
+async function estimatePrice() {
   const dest = document.getElementById('dest-addr').value.trim();
   if (!dest) { alert('请输入目的地'); return; }
-  // mock：固定预估，阶段 9 替换为 GET /order/estimate
+
+  // mock 坐标：望京 → 首都机场
+  const r = await api('/order/estimate?originLat=39.99&originLng=116.48&destLat=40.08&destLng=116.60&region=default');
   document.getElementById('price-box').style.display = 'flex';
-  document.getElementById('est-price').textContent = '¥ 68 - 82';
-  document.getElementById('est-detail').innerHTML = '<div>约 28km</div><div>约 45分钟</div>';
+  if (r.code === 200) {
+    const d = r.data;
+    const surgeText = d.surgeFactor > 1 ? `（高峰 ${d.surgeFactor}x）` : '';
+    document.getElementById('est-price').textContent = `¥ ${d.price}${surgeText}`;
+    document.getElementById('est-detail').innerHTML =
+        `<div>起步价 ¥${d.basePrice}</div><div>¥${d.perKm}/km · ¥${d.perMin}/min</div>`;
+  } else {
+    // 接口失败时 fallback 到 mock 值
+    document.getElementById('est-price').textContent = '¥ 68 - 82';
+    document.getElementById('est-detail').innerHTML = '<div>约 28km</div><div>约 45分钟</div>';
+  }
 }
 
 // ---- 下单 ----
@@ -434,9 +550,7 @@ async function pollOrderStatus() {
     pollTimer = setInterval(() => pollTripStatus(order.id), 5000);
   } else if (order.status === 'FINISHED') {
     stopPolling();
-    alert('行程已结束！感谢您的乘坐。');
-    showScreen('history');
-    loadHistory();
+    showPaymentScreen(order);
   } else if (order.status === 'CANCELLED') {
     stopPolling();
     alert('很抱歉，附近暂无可用司机，订单已自动取消。');
@@ -472,9 +586,7 @@ async function pollTripStatus(orderId) {
 
   if (order.status === 'FINISHED') {
     stopPolling();
-    alert('行程已结束！感谢您的乘坐。');
-    showScreen('history');
-    loadHistory();
+    showPaymentScreen(order);
   } else if (order.status === 'CANCELLED') {
     stopPolling();
     alert('行程已取消。');
@@ -561,6 +673,108 @@ function rebook(origin, dest) {
   document.getElementById('origin-addr').value = origin;
   document.getElementById('dest-addr').value = dest;
   showScreen('home');
+}
+
+// ---- 支付页 ----
+
+/**
+ * 展示支付页，填充账单明细
+ *
+ * 账单拆分逻辑：
+ * - 若后端返回 actualPrice，直接展示
+ * - 里程费/时长费/起步价从 /order/estimate 接口获取（用于明细展示）
+ * - surge 系数 > 1 时显示高峰提示
+ */
+async function showPaymentScreen(order) {
+  currentOrder = order;
+  const price = order.actualPrice || order.estimatedPrice || 0;
+  const surge = parseFloat(order.surgeFactor || 1);
+
+  document.getElementById('pay-amount').textContent = `¥ ${price}`;
+  document.getElementById('bill-total').textContent = `¥ ${price}`;
+
+  // 获取计价规则明细（用于账单拆分展示）
+  const r = await api('/order/estimate?originLat=39.99&originLng=116.48&destLat=40.08&destLng=116.60&region=default');
+  if (r.code === 200) {
+    const d = r.data;
+    // 估算里程和时长（与 finishTrip 中相同的 mock 坐标）
+    const distKm = 13.5; // 望京→首都机场直线约 13.5km
+    const durMin = Math.round(distKm / 40 * 60);
+    document.getElementById('bill-base').textContent = `¥ ${d.basePrice}`;
+    document.getElementById('bill-km').textContent   = `¥ ${(d.perKm * distKm).toFixed(2)}（${distKm}km × ¥${d.perKm}）`;
+    document.getElementById('bill-min').textContent  = `¥ ${(d.perMin * durMin).toFixed(2)}（${durMin}min × ¥${d.perMin}）`;
+  }
+
+  // 高峰系数展示
+  if (surge > 1) {
+    document.getElementById('pay-surge-tip').style.display = 'block';
+    document.getElementById('pay-surge-tip').textContent = `高峰期价格上浮 ${surge}x`;
+    document.getElementById('bill-surge-row').style.display = 'flex';
+    document.getElementById('bill-surge-badge').textContent = `${surge}x`;
+    document.getElementById('bill-surge-val').textContent = `× ${surge}`;
+  }
+
+  showScreen('payment');
+}
+
+/**
+ * 确认支付（mock 支付，直接跳转评价页）
+ *
+ * 真实场景：调用微信/支付宝 SDK 发起支付，回调后跳转评价页。
+ * 当前 mock：直接视为支付成功。
+ */
+function doPay() {
+  const method = document.querySelector('input[name=payMethod]:checked')?.value || 'wechat';
+  const methodName = { wechat: '微信支付', alipay: '支付宝', cash: '现金支付' }[method];
+  // mock 支付成功，跳转评价页
+  showReviewScreen();
+}
+
+// ---- 评价页 ----
+
+function showReviewScreen() {
+  reviewStar = 5;
+  renderStars(5);
+  document.querySelectorAll('.tag').forEach(t => t.classList.remove('selected'));
+  document.getElementById('review-text').value = '';
+  showScreen('review');
+}
+
+/** 设置星级评分，更新星星显示 */
+function setStar(n) {
+  reviewStar = n;
+  renderStars(n);
+}
+
+function renderStars(n) {
+  document.querySelectorAll('.star').forEach((s, i) => {
+    s.textContent = i < n ? '⭐' : '☆';
+  });
+}
+
+/** 切换快速标签选中状态 */
+function toggleTag(el) {
+  el.classList.toggle('selected');
+}
+
+/**
+ * 提交评价（mock，不调用后端接口，阶段 9 范围内不实现评价存储）
+ * 提交后跳转历史行程页。
+ */
+function submitReview() {
+  const tags = [...document.querySelectorAll('.tag.selected')].map(t => t.textContent);
+  const text = document.getElementById('review-text').value.trim();
+  // mock：直接提示成功
+  alert(`感谢您的评价！${reviewStar}星${tags.length ? '，' + tags.join('、') : ''}`);
+  currentOrderId = null;
+  showScreen('history');
+  loadHistory();
+}
+
+function skipReview() {
+  currentOrderId = null;
+  showScreen('history');
+  loadHistory();
 }
 
 // ---- 初始化：检查登录态 ----

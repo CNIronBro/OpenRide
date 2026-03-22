@@ -3,13 +3,20 @@ package com.ironbro.didi.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.entity.Driver;
+import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.enums.AuditStatus;
 import com.ironbro.didi.enums.DriverStatus;
+import com.ironbro.didi.enums.OrderStatus;
 import com.ironbro.didi.mapper.DriverMapper;
+import com.ironbro.didi.mapper.OrderMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.util.List;
 
 /**
  * 司机服务
@@ -24,6 +31,7 @@ public class DriverService {
 
     private final DriverMapper driverMapper;
     private final DriverLocationService locationService;
+    private final OrderMapper orderMapper;
 
     /**
      * 获取司机信息（按 userId 查询）
@@ -79,4 +87,61 @@ public class DriverService {
 
         driverMapper.updateById(driver);
     }
+
+    /**
+     * 查询司机收入统计（今日 + 本周）
+     *
+     * 统计来源：order 表中 driver_id=? AND status=FINISHED 的已完成订单
+     * - 今日收入：finishedAt >= 今日 00:00:00 的订单 actualPrice 之和
+     * - 本周收入：finishedAt >= 本周一 00:00:00 的订单 actualPrice 之和
+     * - 今日订单数：今日完成的订单数量
+     * - 今日行程记录：今日完成的订单列表（用于前端展示）
+     *
+     * @param driverId driver.id
+     * @return 收入统计结果
+     */
+    public IncomeResult getIncome(Long driverId) {
+        LocalDateTime todayStart = LocalDate.now().atStartOfDay();
+        // 本周一 00:00:00（ISO 周，周一为第一天）
+        LocalDateTime weekStart = LocalDate.now()
+                .with(java.time.DayOfWeek.MONDAY).atStartOfDay();
+
+        // 查询今日完成的订单
+        List<Order> todayOrders = orderMapper.selectList(
+                new LambdaQueryWrapper<Order>()
+                        .eq(Order::getDriverId, driverId)
+                        .eq(Order::getStatus, OrderStatus.FINISHED)
+                        .ge(Order::getFinishedAt, todayStart));
+
+        // 查询本周完成的订单（用于计算本周收入）
+        BigDecimal weekIncome = orderMapper.selectList(
+                new LambdaQueryWrapper<Order>()
+                        .eq(Order::getDriverId, driverId)
+                        .eq(Order::getStatus, OrderStatus.FINISHED)
+                        .ge(Order::getFinishedAt, weekStart))
+                .stream()
+                .map(o -> o.getActualPrice() != null ? o.getActualPrice() : BigDecimal.ZERO)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal todayIncome = todayOrders.stream()
+                .map(o -> o.getActualPrice() != null ? o.getActualPrice() : BigDecimal.ZERO)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        return new IncomeResult(todayIncome, weekIncome, todayOrders.size(), todayOrders);
+    }
+
+    /**
+     * 司机收入统计结果
+     *
+     * @param todayIncome  今日收入（元）
+     * @param weekIncome   本周收入（元）
+     * @param todayOrders  今日完成订单数
+     * @param trips        今日行程记录列表
+     */
+    public record IncomeResult(
+            BigDecimal todayIncome,
+            BigDecimal weekIncome,
+            int todayOrders,
+            List<Order> trips
+    ) {}
 }

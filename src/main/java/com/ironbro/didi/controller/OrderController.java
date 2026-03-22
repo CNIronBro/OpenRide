@@ -7,6 +7,7 @@ import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.enums.UserRole;
 import com.ironbro.didi.service.DriverService;
 import com.ironbro.didi.service.OrderService;
+import com.ironbro.didi.service.PricingService;
 import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -35,6 +36,7 @@ public class OrderController {
 
     private final OrderService orderService;
     private final DriverService driverService;
+    private final PricingService pricingService;
 
     /**
      * 乘客下单
@@ -153,4 +155,30 @@ public class OrderController {
             BigDecimal estimatedPrice,
             String city
     ) {}
+
+    /**
+     * 预估价格（下单前调用）
+     *
+     * 根据起终点坐标计算直线距离，结合区域计价规则和当前供需比，
+     * 返回预估价格和 surge 系数，供前端展示"高峰期价格上浮"提示。
+     *
+     * 参数：originLat, originLng, destLat, destLng, region（可选，默认 default）
+     */
+    @GetMapping("/estimate")
+    public Result<PricingService.EstimateResult> estimate(
+            @RequestParam double originLat,
+            @RequestParam double originLng,
+            @RequestParam double destLat,
+            @RequestParam double destLng,
+            @RequestParam(defaultValue = "default") String region,
+            HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "请先登录");
+
+        // 用 Haversine 公式估算直线距离（km），时长按 40km/h 平均速度估算
+        double distanceKm = OrderService.haversineKm(originLat, originLng, destLat, destLng);
+        double durationMin = distanceKm / 40.0 * 60.0; // 40km/h 估算
+
+        return Result.ok(pricingService.estimate(region, distanceKm, durationMin));
+    }
 }

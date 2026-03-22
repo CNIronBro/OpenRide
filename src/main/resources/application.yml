@@ -44,14 +44,21 @@ admin:
   username: admin
   password: admin123
 
-# xxl-job 执行器配置（阶段 8 接入，此处预留）
+# xxl-job 执行器配置
+# 注意：xxl-job-admin 调度中心需单独部署，默认端口 8090（避免与本应用 8080 冲突）
+# 调度中心部署方式：下载 xxl-job 源码，修改 xxl-job-admin 的 server.port=8090 后启动
 xxl:
   job:
     admin:
-      addresses: http://127.0.0.1:8080/xxl-job-admin
+      # 调度中心地址，多个地址用逗号分隔（支持集群）
+      addresses: http://127.0.0.1:8090/xxl-job-admin
     executor:
+      # 执行器名称，需与调度中心配置的执行器 AppName 完全一致
       appname: didi-executor
+      # 执行器监听端口，调度中心通过此端口回调触发任务（与 Spring Boot 8080 端口独立）
       port: 9999
-      logpath: /data/applogs/xxl-job/jobhandler
+      # 任务执行日志路径（Windows 环境改为相对路径）
+      logpath: logs/xxl-job
       logretentiondays: 30
+    # 鉴权 token，需与调度中心 xxl.job.accessToken 配置保持一致
     accessToken: default_token

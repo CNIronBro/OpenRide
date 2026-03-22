@@ -101,6 +101,24 @@
   .step-title { font-size: 14px; font-weight: bold; color: #333; }
   .step-desc { font-size: 12px; color: #999; margin-top: 2px; }
   .trip-action { padding: 0 16px 24px; }
+
+  /* 收入统计页 */
+  #income { background: #f5f5f5; }
+  .income-header { background: #ff6b00; padding: 20px 16px 24px; color: #fff; }
+  .income-header .income-title { font-size: 16px; opacity: 0.9; margin-bottom: 8px; }
+  .income-header .income-amount { font-size: 40px; font-weight: bold; }
+  .income-header .income-sub { font-size: 13px; opacity: 0.8; margin-top: 4px; }
+  .income-stats { display: flex; gap: 8px; margin-top: 16px; }
+  .income-stat { flex: 1; background: rgba(255,255,255,0.15); border-radius: 10px; padding: 10px; text-align: center; }
+  .income-stat .val { font-size: 18px; font-weight: bold; }
+  .income-stat .lbl { font-size: 11px; opacity: 0.85; margin-top: 2px; }
+  .trip-list { padding: 12px; flex: 1; overflow-y: auto; }
+  .trip-card { background: #fff; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+  .trip-card .trip-time { font-size: 12px; color: #999; margin-bottom: 8px; }
+  .trip-card .trip-route { font-size: 13px; color: #555; margin-bottom: 6px; }
+  .trip-card .trip-footer { display: flex; justify-content: space-between; align-items: center; }
+  .trip-card .trip-price { font-size: 16px; font-weight: bold; color: #ff6b00; }
+  .income-back { padding: 12px 16px; }
 </style>
 </head>
 <body>
@@ -159,6 +177,7 @@
       <div class="status-icon" id="statusIcon">😴</div>
       <div class="status-text" id="statusText">当前离线，请上线开始接单</div>
     </div>
+    <button class="btn btn-secondary" style="margin-top:12px" onclick="showIncomeScreen()">查看收入统计</button>
   </div>
 </div>
 
@@ -245,6 +264,26 @@
   </div>
   <div class="trip-action">
     <button class="btn btn-primary" id="tripActionBtn" onclick="tripAction()">已到达接客点</button>
+  </div>
+</div>
+
+<!-- 收入统计页 -->
+<div id="income" class="screen">
+  <div class="income-header">
+    <div class="income-title">今日收入</div>
+    <div class="income-amount" id="incTodayAmount">¥ 0.00</div>
+    <div class="income-sub" id="incWeekSub">本周收入 ¥ 0.00</div>
+    <div class="income-stats">
+      <div class="income-stat"><div class="val" id="incTodayOrders">0</div><div class="lbl">今日订单</div></div>
+      <div class="income-stat"><div class="val" id="incRating">5.0</div><div class="lbl">综合评分</div></div>
+      <div class="income-stat"><div class="val" id="incAcceptRate">-</div><div class="lbl">接单率</div></div>
+    </div>
+  </div>
+  <div class="trip-list" id="incTripList">
+    <div style="text-align:center;color:#999;padding:40px 0;font-size:14px">加载中...</div>
+  </div>
+  <div class="income-back">
+    <button class="btn btn-secondary" onclick="showScreen('home')">返回</button>
   </div>
 </div>
 
@@ -497,6 +536,57 @@ function startLocationReport() {
     const lng = 116.4 + (Math.random() - 0.5) * 0.1;
     api('/driver/location', 'POST', { lat, lng, timestamp: Date.now(), city: 'default' });
   }, 5000);
+}
+
+// ----------------------------------------------------------------
+// 收入统计页
+// ----------------------------------------------------------------
+
+/**
+ * 展示收入统计页，加载今日/本周收入和行程记录
+ */
+async function showIncomeScreen() {
+  showScreen('income');
+  const d = state.driverInfo;
+  if (d) {
+    document.getElementById('incRating').textContent     = d.rating ? parseFloat(d.rating).toFixed(1) : '5.0';
+    document.getElementById('incAcceptRate').textContent = d.acceptRate ? Math.round(d.acceptRate * 100) + '%' : '-';
+  }
+
+  const res = await api('/driver/income', 'GET');
+  if (!res.ok) {
+    document.getElementById('incTripList').innerHTML =
+        '<div style="text-align:center;color:#999;padding:40px 0;font-size:14px">加载失败</div>';
+    return;
+  }
+
+  const data = res.data;
+  document.getElementById('incTodayAmount').textContent = `¥ ${data.todayIncome || '0.00'}`;
+  document.getElementById('incWeekSub').textContent     = `本周收入 ¥ ${data.weekIncome || '0.00'}`;
+  document.getElementById('incTodayOrders').textContent = data.todayOrders || 0;
+
+  // 渲染今日行程记录
+  const trips = data.trips || [];
+  if (trips.length === 0) {
+    document.getElementById('incTripList').innerHTML =
+        '<div style="text-align:center;color:#999;padding:40px 0;font-size:14px">今日暂无行程</div>';
+    return;
+  }
+
+  document.getElementById('incTripList').innerHTML = trips.map(t => {
+    const time = (t.finishedAt || t.createdAt || '').slice(11, 16);
+    const price = t.actualPrice ? `¥${t.actualPrice}` : '-';
+    return `
+      <div class="trip-card">
+        <div class="trip-time">${time}</div>
+        <div class="trip-route">📍 ${t.originAddr || '-'}</div>
+        <div class="trip-route">🏁 ${t.destAddr || '-'}</div>
+        <div class="trip-footer">
+          <span class="trip-price">${price}</span>
+          <span style="font-size:12px;color:#999">已完成</span>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 // ----------------------------------------------------------------

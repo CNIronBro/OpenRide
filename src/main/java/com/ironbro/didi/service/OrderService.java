@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
@@ -44,6 +45,7 @@ public class OrderService {
     private final DriverMapper driverMapper;
     private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
+    private final PricingService pricingService;
 
     /**
      * 乘客下单
@@ -212,10 +214,12 @@ public class OrderService {
     /**
      * 结束行程（IN_TRIP → FINISHED）
      *
-     * 行程结束后触发简单计价（阶段 9 将替换为完整 PricingService）：
-     * 当前直接使用 estimatedPrice 作为 actualPrice，surgeFactor 保持 1.0。
+     * 行程结束后调用 PricingService 计算真实价格：
+     * - 距离：根据起终点坐标用 Haversine 公式估算（mock 场景下坐标固定，结果稳定）
+     * - 时长：startedAt → finishedAt 的分钟数
+     * - surge 系数：从 Redis 读取区域供需比实时计算
      *
-     * 副作用：司机状态恢复为 ONLINE，重新加入 GEO 在线集合（阶段 6 暂不重新加入 GEO，
+     * 副作用：司机状态恢复为 ONLINE，等待下一单（不重新加入 GEO，
      * 司机需重新上报位置才会出现在 GEO 中，符合实际业务逻辑）。
      *
      * @param orderId  订单 ID
@@ -227,10 +231,29 @@ public class OrderService {
         if (order.getStatus() != OrderStatus.IN_TRIP) {
             throw new BizException(400, "当前订单状态不允许此操作");
         }
+
+        LocalDateTime finishedAt = LocalDateTime.now();
         order.setStatus(OrderStatus.FINISHED);
-        order.setFinishedAt(LocalDateTime.now());
-        // 阶段 6 简单计价：actual_price = estimated_price（阶段 9 替换为动态计价）
-        order.setActualPrice(order.getEstimatedPrice());
+        order.setFinishedAt(finishedAt);
+
+        // 计算行程时长（分钟），startedAt 为空时兜底用 10 分钟
+        double durationMin = order.getStartedAt() != null
+                ? Duration.between(order.getStartedAt(), finishedAt).toMinutes()
+                : 10.0;
+
+        // 计算行程距离（km），用 Haversine 公式估算起终点直线距离
+        // mock 坐标场景下结果稳定，真实场景可替换为地图 API 返回的实际里程
+        double distanceKm = haversineKm(
+                order.getOriginLat().doubleValue(), order.getOriginLng().doubleValue(),
+                order.getDestLat().doubleValue(),   order.getDestLng().doubleValue()
+        );
+
+        // 调用动态计价服务，计算含 surge 系数的最终价格
+        BigDecimal actualPrice = pricingService.calculate("default", distanceKm, durationMin);
+        BigDecimal surgeFactor = pricingService.getSurgeFactor("default");
+
+        order.setActualPrice(actualPrice);
+        order.setSurgeFactor(surgeFactor);
         orderMapper.updateById(order);
 
         // 司机行程结束，恢复 ONLINE 状态，等待下一单
@@ -241,7 +264,8 @@ public class OrderService {
             driverMapper.updateById(driver);
         }
 
-        log.info("行程结束 orderId={} driverId={} actualPrice={}", orderId, driverId, order.getActualPrice());
+        log.info("行程结束 orderId={} driverId={} dist={}km dur={}min actualPrice={} surgeFactor={}",
+                orderId, driverId, distanceKm, durationMin, actualPrice, surgeFactor);
         return order;
     }
 
@@ -345,4 +369,20 @@ public class OrderService {
             BigDecimal estimatedPrice,
             String city
     ) {}
+
+    /**
+     * Haversine 公式计算两点间球面距离（公里）
+     *
+     * 用于行程结束时估算里程，精度满足计价需求（误差 < 0.5%）。
+     * 真实场景可替换为地图 API 返回的实际行驶里程。
+     */
+    static double haversineKm(double lat1, double lng1, double lat2, double lng2) {
+        final double R = 6371.0; // 地球半径（km）
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLng = Math.toRadians(lng2 - lng1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
 }

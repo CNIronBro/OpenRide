@@ -13,13 +13,11 @@ import org.springframework.data.geo.Metrics;
 import org.springframework.data.geo.Point;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * 司机位置服务
@@ -28,7 +26,7 @@ import java.util.Set;
  * 1. 位置上报：写入 Redis GEO + 刷新心跳 TTL
  * 2. 治理：频率控制（5s）、乱序过滤、漂移过滤（500m/5s）
  * 3. 附近司机召回：GEORADIUS
- * 4. 假在线检测：@Scheduled 每 30s 扫描心跳过期司机（阶段 8 替换为 xxl-job）
+ * 4. 假在线检测：由 xxl-job FakeOnlineCleanJob 定期调用 removeFromOnline 完成清理
  *
  * Redis Key 设计（见 technical-design.md 4.5 节）：
  *   driver:online:{city}            ZSET(GEO)  在线司机地理位置
@@ -170,39 +168,6 @@ public class DriverLocationService {
         redisTemplate.delete("driver:location:last:" + driverId);
         redisTemplate.delete("driver:location:pos:" + driverId);
         redisTemplate.delete("driver:location:ts:" + driverId);
-    }
-
-    // ----------------------------------------------------------------
-    // 4.6 假在线检测（临时用 @Scheduled，阶段 8 替换为 xxl-job）
-    // ----------------------------------------------------------------
-
-    /**
-     * 每 30s 扫描一次：心跳 key 已过期但仍在 GEO 集合中的司机，视为假在线，强制下线。
-     *
-     * 实现思路：
-     * 1. 扫描数据库中 status=ONLINE 的司机
-     * 2. 检查其心跳 key 是否存在
-     * 3. 不存在则从 GEO 集合移除，更新 DB status=OFFLINE
-     *
-     * 注意：此处用 city="default" 简化，生产环境应按城市分片扫描。
-     * 阶段 8 接入 xxl-job 后，此方法将被 JobHandler 替代。
-     */
-    @Scheduled(fixedDelay = 30_000)
-    public void cleanFakeOnlineDrivers() {
-        List<Driver> onlineDrivers = driverMapper.selectList(
-                new LambdaQueryWrapper<Driver>().eq(Driver::getStatus, DriverStatus.ONLINE));
-
-        for (Driver driver : onlineDrivers) {
-            String heartbeatKey = "driver:heartbeat:" + driver.getId();
-            Boolean alive = redisTemplate.hasKey(heartbeatKey);
-            if (!Boolean.TRUE.equals(alive)) {
-                // 心跳过期，强制下线
-                removeFromOnline(driver.getId(), "default");
-                driver.setStatus(DriverStatus.OFFLINE);
-                driverMapper.updateById(driver);
-                log.info("假在线司机已清理 driverId={}", driver.getId());
-            }
-        }
     }
 
     // ----------------------------------------------------------------
