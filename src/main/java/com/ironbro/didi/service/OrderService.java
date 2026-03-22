@@ -376,7 +376,7 @@ public class OrderService {
      * 用于行程结束时估算里程，精度满足计价需求（误差 < 0.5%）。
      * 真实场景可替换为地图 API 返回的实际行驶里程。
      */
-    static double haversineKm(double lat1, double lng1, double lat2, double lng2) {
+    public static double haversineKm(double lat1, double lng1, double lat2, double lng2) {
         final double R = 6371.0; // 地球半径（km）
         double dLat = Math.toRadians(lat2 - lat1);
         double dLng = Math.toRadians(lng2 - lng1);
