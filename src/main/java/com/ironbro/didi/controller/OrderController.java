@@ -4,12 +4,15 @@ import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.common.Result;
 import com.ironbro.didi.common.SessionUtils;
 import com.ironbro.didi.entity.Order;
+import com.ironbro.didi.enums.UserRole;
+import com.ironbro.didi.service.DriverService;
 import com.ironbro.didi.service.OrderService;
 import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.util.Map;
 
 /**
  * 订单控制器
@@ -18,7 +21,12 @@ import java.math.BigDecimal;
  * - POST /order/create  乘客下单
  * - GET  /order/{id}    查询订单状态（乘客端轮询）
  *
- * 阶段 6 将补充：接单、行程状态流转、取消等接口。
+ * 阶段 6 新增：
+ * - POST /order/{id}/accept  司机接单（CAS 乐观锁）
+ * - POST /order/{id}/arrive  司机到达接客点
+ * - POST /order/{id}/start   开始行程
+ * - POST /order/{id}/finish  结束行程
+ * - POST /order/{id}/cancel  取消订单（乘客/司机）
  */
 @RestController
 @RequestMapping("/order")
@@ -26,6 +34,7 @@ import java.math.BigDecimal;
 public class OrderController {
 
     private final OrderService orderService;
+    private final DriverService driverService;
 
     /**
      * 乘客下单
@@ -36,23 +45,14 @@ public class OrderController {
     @PostMapping("/create")
     public Result<Order> createOrder(@RequestBody CreateOrderReq req, HttpSession session) {
         Long passengerId = SessionUtils.getUserId(session);
-        if (passengerId == null) {
-            throw new BizException(401, "请先登录");
-        }
+        if (passengerId == null) throw new BizException(401, "请先登录");
 
         OrderService.CreateOrderRequest serviceReq = new OrderService.CreateOrderRequest(
-                req.originLat(),
-                req.originLng(),
-                req.originAddr(),
-                req.destLat(),
-                req.destLng(),
-                req.destAddr(),
-                req.estimatedPrice(),
-                req.city() != null ? req.city() : "default"
+                req.originLat(), req.originLng(), req.originAddr(),
+                req.destLat(), req.destLng(), req.destAddr(),
+                req.estimatedPrice(), req.city() != null ? req.city() : "default"
         );
-
-        Order order = orderService.createOrder(passengerId, serviceReq);
-        return Result.ok(order);
+        return Result.ok(orderService.createOrder(passengerId, serviceReq));
     }
 
     /**
@@ -63,10 +63,83 @@ public class OrderController {
     @GetMapping("/{id}")
     public Result<Order> getOrder(@PathVariable Long id, HttpSession session) {
         Long passengerId = SessionUtils.getUserId(session);
-        if (passengerId == null) {
-            throw new BizException(401, "请先登录");
-        }
+        if (passengerId == null) throw new BizException(401, "请先登录");
         return Result.ok(orderService.getOrder(id, passengerId));
+    }
+
+    /**
+     * 司机接单（CAS 乐观锁）
+     *
+     * 并发场景：多个司机同时接同一订单，只有一个成功，其余返回 409。
+     * 司机身份通过 session userId → driver.id 解析。
+     */
+    @PostMapping("/{id}/accept")
+    public Result<Order> accept(@PathVariable Long id, HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "请先登录");
+        // 通过 userId 查出 driver.id（接单操作使用 driver.id 而非 user_id）
+        Long driverId = driverService.getDriverByUserId(userId).getId();
+        return Result.ok(orderService.acceptOrder(id, driverId));
+    }
+
+    /** 司机到达接客点（ACCEPTED → PICKING） */
+    @PostMapping("/{id}/arrive")
+    public Result<Order> arrive(@PathVariable Long id, HttpSession session) {
+        Long driverId = getDriverId(session);
+        return Result.ok(orderService.arrive(id, driverId));
+    }
+
+    /** 开始行程（PICKING → IN_TRIP） */
+    @PostMapping("/{id}/start")
+    public Result<Order> start(@PathVariable Long id, HttpSession session) {
+        Long driverId = getDriverId(session);
+        return Result.ok(orderService.startTrip(id, driverId));
+    }
+
+    /** 结束行程（IN_TRIP → FINISHED） */
+    @PostMapping("/{id}/finish")
+    public Result<Order> finish(@PathVariable Long id, HttpSession session) {
+        Long driverId = getDriverId(session);
+        return Result.ok(orderService.finishTrip(id, driverId));
+    }
+
+    /**
+     * 司机端查询订单详情（用于新订单弹窗展示）
+     *
+     * 与乘客端 GET /order/{id} 不同，此接口不校验 passengerId，
+     * 仅校验订单存在且状态为 DISPATCHING（防止查询已过期订单）。
+     */
+    @GetMapping("/{id}/driver-view")
+    public Result<Order> driverView(@PathVariable Long id, HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "请先登录");
+        Order order = orderService.getOrderForDriverView(id);
+        return Result.ok(order);
+    }
+
+    /**
+     * 取消订单（乘客或司机主动取消）
+     *
+     * 请求体：{ "reason": "临时有事" }
+     * 取消方由 session 中的 role 决定（PASSENGER / DRIVER）。
+     */
+    @PostMapping("/{id}/cancel")
+    public Result<Void> cancel(@PathVariable Long id,
+                               @RequestBody Map<String, String> body,
+                               HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "请先登录");
+        UserRole role = SessionUtils.getRole(session);
+        String cancelBy = role == UserRole.PASSENGER ? "PASSENGER" : "DRIVER";
+        orderService.cancelOrder(id, userId, cancelBy, body.getOrDefault("reason", ""));
+        return Result.ok();
+    }
+
+    /** 从 session 中解析司机 driver.id（行程操作公共方法） */
+    private Long getDriverId(HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "请先登录");
+        return driverService.getDriverByUserId(userId).getId();
     }
 
     /** 下单请求体 */

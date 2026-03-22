@@ -94,6 +94,8 @@ public class DriverLocationService {
                 String.valueOf(timestamp), Duration.ofMinutes(5));
 
         // 4.8 漂移过滤：与上次位置距离超过 500m/5s，丢弃
+        // TODO 当前容易出现锁死风险，假如后续的位置都与上次位置发生了漂移，那么位置一直不能被更新。
+        //  并且还要考虑到即使发生位置漂移，心跳ttl也要被刷新。
         String lastPos = redisTemplate.opsForValue().get(lastPosKey);
         if (lastPos != null) {
             String[] parts = lastPos.split(",");

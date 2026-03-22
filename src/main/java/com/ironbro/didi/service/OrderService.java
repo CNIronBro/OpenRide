@@ -1,13 +1,18 @@
 package com.ironbro.didi.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.config.RabbitMqConfig;
+import com.ironbro.didi.entity.Driver;
 import com.ironbro.didi.entity.Order;
+import com.ironbro.didi.enums.DriverStatus;
 import com.ironbro.didi.enums.OrderStatus;
+import com.ironbro.didi.mapper.DriverMapper;
 import com.ironbro.didi.mapper.OrderMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,7 +41,9 @@ import java.util.Map;
 public class OrderService {
 
     private final OrderMapper orderMapper;
+    private final DriverMapper driverMapper;
     private final RabbitTemplate rabbitTemplate;
+    private final StringRedisTemplate redisTemplate;
 
     /**
      * 乘客下单
@@ -107,6 +114,212 @@ public class OrderService {
         if (!order.getPassengerId().equals(passengerId)) {
             throw new BizException(403, "无权查看此订单");
         }
+        return order;
+    }
+
+    // ----------------------------------------------------------------
+    // 阶段 6：行程状态流转
+    // ----------------------------------------------------------------
+
+    /**
+     * 司机接单（CAS 乐观锁）
+     *
+     * 核心并发控制：
+     * 使用 MyBatis-Plus @Version 乐观锁，底层 SQL 为：
+     *   UPDATE `order` SET driver_id=?, status='ACCEPTED', version=version+1
+     *   WHERE id=? AND status='DISPATCHING' AND version=?
+     * 若 version 不匹配（已被其他司机接单），updateById 返回影响行数为 0，
+     * MyBatis-Plus 会抛出 OptimisticLockerException，此处捕获后转为业务异常。
+     *
+     * 接单成功后副作用：
+     * 1. 司机状态改为 IN_TRIP，从 GEO 在线集合移除（不再参与新派单）
+     * 2. 清除司机待接单通知 key（driver:pending:order:{driverId}）
+     *
+     * @param orderId  订单 ID
+     * @param driverId 司机的 driver.id（非 user_id）
+     */
+    @Transactional
+    public Order acceptOrder(Long orderId, Long driverId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) throw new BizException("订单不存在");
+        if (order.getStatus() != OrderStatus.DISPATCHING) {
+            throw new BizException(409, "订单已被接单或已取消");
+        }
+
+        // CAS 更新：@Version 注解会自动追加 AND version=? 并自增
+        // 若并发接单导致 version 不匹配，updateById 影响行数为 0，抛 OptimisticLockerException
+        order.setDriverId(driverId);
+        order.setStatus(OrderStatus.ACCEPTED);
+        order.setAcceptedAt(LocalDateTime.now());
+        int rows = orderMapper.updateById(order);
+        if (rows == 0) {
+            // 乐观锁冲突：订单已被其他司机抢走
+            throw new BizException(409, "订单已被其他司机接单");
+        }
+
+        // 接单成功：更新司机状态为 IN_TRIP，从 GEO 在线集合移除
+        Driver driver = driverMapper.selectById(driverId);
+        if (driver != null) {
+            driver.setStatus(DriverStatus.IN_TRIP);
+            driverMapper.updateById(driver);
+            // 从 GEO 在线集合移除，行程中司机不参与新派单
+            // 城市默认 "default"，阶段 7 可扩展为从订单中取 city
+            redisTemplate.opsForZSet().remove("driver:online:default", String.valueOf(driverId));
+        }
+
+        // 清除司机待接单通知 key，避免司机端重复弹窗
+        redisTemplate.delete("driver:pending:order:" + driverId);
+
+        log.info("司机接单成功 orderId={} driverId={}", orderId, driverId);
+        return orderMapper.selectById(orderId);
+    }
+
+    /**
+     * 司机到达接客点（ACCEPTED → PICKING）
+     *
+     * @param orderId  订单 ID
+     * @param driverId 司机 driver.id（用于鉴权，防止越权操作他人订单）
+     */
+    @Transactional
+    public Order arrive(Long orderId, Long driverId) {
+        Order order = getOrderForDriver(orderId, driverId);
+        if (order.getStatus() != OrderStatus.ACCEPTED) {
+            throw new BizException(400, "当前订单状态不允许此操作");
+        }
+        order.setStatus(OrderStatus.PICKING);
+        orderMapper.updateById(order);
+        return order;
+    }
+
+    /**
+     * 开始行程（PICKING → IN_TRIP）
+     *
+     * @param orderId  订单 ID
+     * @param driverId 司机 driver.id
+     */
+    @Transactional
+    public Order startTrip(Long orderId, Long driverId) {
+        Order order = getOrderForDriver(orderId, driverId);
+        if (order.getStatus() != OrderStatus.PICKING) {
+            throw new BizException(400, "当前订单状态不允许此操作");
+        }
+        order.setStatus(OrderStatus.IN_TRIP);
+        order.setStartedAt(LocalDateTime.now());
+        orderMapper.updateById(order);
+        return order;
+    }
+
+    /**
+     * 结束行程（IN_TRIP → FINISHED）
+     *
+     * 行程结束后触发简单计价（阶段 9 将替换为完整 PricingService）：
+     * 当前直接使用 estimatedPrice 作为 actualPrice，surgeFactor 保持 1.0。
+     *
+     * 副作用：司机状态恢复为 ONLINE，重新加入 GEO 在线集合（阶段 6 暂不重新加入 GEO，
+     * 司机需重新上报位置才会出现在 GEO 中，符合实际业务逻辑）。
+     *
+     * @param orderId  订单 ID
+     * @param driverId 司机 driver.id
+     */
+    @Transactional
+    public Order finishTrip(Long orderId, Long driverId) {
+        Order order = getOrderForDriver(orderId, driverId);
+        if (order.getStatus() != OrderStatus.IN_TRIP) {
+            throw new BizException(400, "当前订单状态不允许此操作");
+        }
+        order.setStatus(OrderStatus.FINISHED);
+        order.setFinishedAt(LocalDateTime.now());
+        // 阶段 6 简单计价：actual_price = estimated_price（阶段 9 替换为动态计价）
+        order.setActualPrice(order.getEstimatedPrice());
+        orderMapper.updateById(order);
+
+        // 司机行程结束，恢复 ONLINE 状态，等待下一单
+        Driver driver = driverMapper.selectById(driverId);
+        if (driver != null) {
+            driver.setStatus(DriverStatus.ONLINE);
+            driver.setIdleSince(LocalDateTime.now());
+            driverMapper.updateById(driver);
+        }
+
+        log.info("行程结束 orderId={} driverId={} actualPrice={}", orderId, driverId, order.getActualPrice());
+        return order;
+    }
+
+    /**
+     * 取消订单（乘客或司机主动取消）
+     *
+     * 允许取消的状态：DISPATCHING、ACCEPTED、PICKING
+     * 行程中（IN_TRIP）不允许取消，需联系客服处理。
+     *
+     * 取消后副作用：
+     * - 若司机已接单（status >= ACCEPTED），司机状态恢复为 ONLINE
+     *
+     * @param orderId   订单 ID
+     * @param userId    操作者 user_id（乘客或司机的 user_id，用于鉴权）
+     * @param cancelBy  取消方：PASSENGER / DRIVER
+     * @param reason    取消原因
+     */
+    @Transactional
+    public void cancelOrder(Long orderId, Long userId, String cancelBy, String reason) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) throw new BizException("订单不存在");
+
+        // 鉴权：乘客只能取消自己的订单；司机通过 driver.userId 关联
+        if ("PASSENGER".equals(cancelBy) && !order.getPassengerId().equals(userId)) {
+            throw new BizException(403, "无权操作此订单");
+        }
+        if ("DRIVER".equals(cancelBy)) {
+            // 校验 userId 对应的司机是否是该订单的接单司机
+            Driver driver = driverMapper.selectOne(
+                    new LambdaQueryWrapper<Driver>().eq(Driver::getUserId, userId));
+            if (driver == null || !driver.getId().equals(order.getDriverId())) {
+                throw new BizException(403, "无权操作此订单");
+            }
+        }
+
+        if (order.getStatus() == OrderStatus.IN_TRIP) {
+            throw new BizException(400, "行程中无法取消，请联系客服");
+        }
+        if (order.getStatus() == OrderStatus.FINISHED || order.getStatus() == OrderStatus.CANCELLED) {
+            throw new BizException(400, "订单已结束，无法取消");
+        }
+
+        order.setStatus(OrderStatus.CANCELLED);
+        order.setCancelBy(cancelBy);
+        order.setCancelReason(reason);
+        order.setCancelledAt(LocalDateTime.now());
+        orderMapper.updateById(order);
+
+        // 若司机已接单，取消后恢复司机为 ONLINE
+        if (order.getDriverId() != null) {
+            Driver driver = driverMapper.selectById(order.getDriverId());
+            if (driver != null && driver.getStatus() == DriverStatus.IN_TRIP) {
+                driver.setStatus(DriverStatus.ONLINE);
+                driver.setIdleSince(LocalDateTime.now());
+                driverMapper.updateById(driver);
+            }
+        }
+
+        log.info("订单取消 orderId={} cancelBy={} reason={}", orderId, cancelBy, reason);
+    }
+
+    /**
+     * 司机端查询订单详情（用于新订单弹窗，不校验乘客身份）
+     */
+    public Order getOrderForDriverView(Long orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) throw new BizException("订单不存在");
+        return order;
+    }
+
+    /**
+     * 查询订单（司机端鉴权）
+     * 校验订单存在且 driverId 匹配，防止越权操作他人订单。
+     */
+    private Order getOrderForDriver(Long orderId, Long driverId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) throw new BizException("订单不存在");
+        if (!driverId.equals(order.getDriverId())) throw new BizException(403, "无权操作此订单");
         return order;
     }
 

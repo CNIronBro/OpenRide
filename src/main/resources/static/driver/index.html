@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DiDi 司机端</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #f5f5f5; max-width: 390px; margin: 0 auto; }
+  .screen { display: none; min-height: 100vh; }
+  .screen.active { display: flex; flex-direction: column; }
+
+  /* 登录页 */
+  #login { background: #fff; justify-content: center; align-items: center; padding: 40px 24px; }
+  .logo { font-size: 48px; margin-bottom: 8px; }
+  .logo-text { font-size: 28px; font-weight: bold; color: #ff6b00; margin-bottom: 8px; }
+  .logo-sub { font-size: 14px; color: #999; margin-bottom: 40px; }
+  .form-group { width: 100%; margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 14px; color: #666; margin-bottom: 6px; }
+  .form-group input { width: 100%; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 16px; }
+  .btn { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+  .btn-primary { background: #ff6b00; color: #fff; }
+  .btn-secondary { background: #f0f0f0; color: #333; margin-top: 12px; }
+  .hint { font-size: 12px; color: #999; margin-top: 8px; }
+  .err-msg { color: #e91e63; font-size: 13px; margin-top: 8px; min-height: 18px; }
+
+  /* 审核中页 */
+  #pending { background: #fff; justify-content: center; align-items: center; padding: 40px 24px; text-align: center; }
+  .pending-icon { font-size: 72px; margin-bottom: 24px; }
+  .pending-title { font-size: 22px; font-weight: bold; color: #333; margin-bottom: 12px; }
+  .pending-desc { font-size: 14px; color: #999; line-height: 1.6; margin-bottom: 32px; }
+
+  /* 接单主页 */
+  #home { background: #f5f5f5; }
+  .driver-header { background: #ff6b00; padding: 20px 16px 24px; color: #fff; }
+  .driver-info { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .driver-avatar { width: 48px; height: 48px; background: rgba(255,255,255,0.3); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+  .driver-name { font-size: 18px; font-weight: bold; }
+  .driver-plate { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+  .online-toggle { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .toggle-label { font-size: 14px; }
+  .toggle-switch { position: relative; width: 48px; height: 26px; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: rgba(255,255,255,0.3); border-radius: 26px; cursor: pointer; transition: .3s; }
+  .toggle-slider:before { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .3s; }
+  input:checked + .toggle-slider { background: #4caf50; }
+  input:checked + .toggle-slider:before { transform: translateX(22px); }
+  .stats-row { display: flex; gap: 8px; }
+  .stat-card { flex: 1; background: rgba(255,255,255,0.15); border-radius: 10px; padding: 10px; text-align: center; }
+  .stat-val { font-size: 20px; font-weight: bold; }
+  .stat-label { font-size: 11px; opacity: 0.85; margin-top: 2px; }
+  .home-body { padding: 16px; flex: 1; }
+  .status-card { background: #fff; border-radius: 12px; padding: 20px; text-align: center; }
+  .status-icon { font-size: 48px; margin-bottom: 12px; }
+  .status-text { font-size: 16px; color: #666; }
+  .status-text.online { color: #4caf50; font-weight: bold; }
+
+  /* 新订单弹窗 */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: flex-end; max-width: 390px; margin: 0 auto; }
+  .modal-overlay.show { display: flex; }
+  .order-modal { background: #fff; border-radius: 20px 20px 0 0; padding: 24px; width: 100%; }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .modal-title { font-size: 18px; font-weight: bold; color: #333; }
+  .countdown { width: 44px; height: 44px; border-radius: 50%; background: #ff6b00; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: bold; }
+  .countdown.urgent { background: #e91e63; }
+  .route-info { margin-bottom: 16px; }
+  .route-row { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+  .route-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+  .route-dot.start { background: #4caf50; }
+  .route-dot.end { background: #ff6b00; }
+  .route-addr { font-size: 14px; color: #333; line-height: 1.4; }
+  .route-meta { font-size: 12px; color: #999; margin-top: 2px; }
+  .order-price { background: #fff8f0; border-radius: 10px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .order-price .price { font-size: 26px; font-weight: bold; color: #ff6b00; }
+  .order-price .price-label { font-size: 13px; color: #999; }
+  .modal-btns { display: flex; gap: 12px; }
+  .modal-btns .btn { flex: 1; padding: 14px; }
+  .btn-reject { background: #f5f5f5; color: #666; }
+  .btn-accept { background: #ff6b00; color: #fff; }
+
+  /* 行程中页 */
+  #trip { background: #f5f5f5; }
+  .trip-header { background: #ff6b00; padding: 16px; color: #fff; }
+  .trip-title { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
+  .trip-subtitle { font-size: 13px; opacity: 0.85; }
+  .trip-body { padding: 16px; flex: 1; }
+  .passenger-card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px; }
+  .passenger-avatar { width: 44px; height: 44px; background: #f0f0f0; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+  .passenger-name { font-size: 16px; font-weight: bold; color: #333; }
+  .passenger-phone { font-size: 13px; color: #999; margin-top: 2px; }
+  .trip-route { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+  .trip-route-title { font-size: 14px; color: #999; margin-bottom: 12px; }
+  .steps { display: flex; flex-direction: column; }
+  .step { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; position: relative; }
+  .step:not(:last-child):after { content: ""; position: absolute; left: 11px; top: 30px; bottom: -10px; width: 2px; background: #eee; }
+  .step-dot { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  .step-dot.done   { background: #4caf50; color: #fff; }
+  .step-dot.active { background: #ff6b00; color: #fff; }
+  .step-dot.pending { background: #eee; color: #999; }
+  .step-content { flex: 1; }
+  .step-title { font-size: 14px; font-weight: bold; color: #333; }
+  .step-desc { font-size: 12px; color: #999; margin-top: 2px; }
+  .trip-action { padding: 0 16px 24px; }
+</style>
+</head>
+<body>
+
+<!-- 登录页 -->
+<div id="login" class="screen active">
+  <div class="logo">🚗</div>
+  <div class="logo-text">DiDi 司机端</div>
+  <div class="logo-sub">安全出行，共创美好</div>
+  <div class="form-group">
+    <label>手机号</label>
+    <input id="loginPhone" type="tel" placeholder="请输入手机号" maxlength="11">
+  </div>
+  <div class="form-group">
+    <label>验证码</label>
+    <input id="loginCode" type="text" placeholder="请输入验证码" maxlength="6">
+    <div class="hint">测试验证码：123456</div>
+  </div>
+  <div id="loginErr" class="err-msg"></div>
+  <button class="btn btn-primary" onclick="doLogin()">登录</button>
+</div>
+
+<!-- 审核中页 -->
+<div id="pending" class="screen">
+  <div class="pending-icon">⏳</div>
+  <div class="pending-title">资质审核中</div>
+  <div class="pending-desc">您的驾驶资质正在审核中，<br>审核通过后即可上线接单。<br>通常需要 1-3 个工作日。</div>
+  <button class="btn btn-secondary" onclick="doLogout()">退出登录</button>
+</div>
+
+<!-- 接单主页 -->
+<div id="home" class="screen">
+  <div class="driver-header">
+    <div class="driver-info">
+      <div class="driver-avatar">👤</div>
+      <div>
+        <div class="driver-name" id="driverName">司机</div>
+        <div class="driver-plate" id="driverPlate">—</div>
+      </div>
+      <div class="online-toggle">
+        <span class="toggle-label" id="onlineLabel">离线</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="onlineSwitch" onchange="toggleOnline()">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="stats-row">
+      <div class="stat-card"><div class="stat-val" id="statIncome">¥0</div><div class="stat-label">今日收入</div></div>
+      <div class="stat-card"><div class="stat-val" id="statOrders">0</div><div class="stat-label">今日订单</div></div>
+      <div class="stat-card"><div class="stat-val" id="statRating">5.0</div><div class="stat-label">综合评分</div></div>
+    </div>
+  </div>
+  <div class="home-body">
+    <div class="status-card">
+      <div class="status-icon" id="statusIcon">😴</div>
+      <div class="status-text" id="statusText">当前离线，请上线开始接单</div>
+    </div>
+  </div>
+</div>
+
+<!-- 新订单弹窗 -->
+<div id="orderModal" class="modal-overlay">
+  <div class="order-modal">
+    <div class="modal-header">
+      <div class="modal-title">新订单</div>
+      <div class="countdown" id="countdown">15</div>
+    </div>
+    <div class="route-info">
+      <div class="route-row">
+        <div class="route-dot start"></div>
+        <div>
+          <div class="route-addr" id="modalOrigin">—</div>
+          <div class="route-meta" id="modalDistance">距您约 —</div>
+        </div>
+      </div>
+      <div class="route-row">
+        <div class="route-dot end"></div>
+        <div>
+          <div class="route-addr" id="modalDest">—</div>
+        </div>
+      </div>
+    </div>
+    <div class="order-price">
+      <div class="price-label">预估收入</div>
+      <div class="price" id="modalPrice">¥—</div>
+    </div>
+    <div class="modal-btns">
+      <button class="btn btn-reject" onclick="rejectOrder()">忽略</button>
+      <button class="btn btn-accept" onclick="acceptOrder()">立即接单</button>
+    </div>
+  </div>
+</div>
+
+<!-- 行程中页 -->
+<div id="trip" class="screen">
+  <div class="trip-header">
+    <div class="trip-title" id="tripTitle">前往接客点</div>
+    <div class="trip-subtitle" id="tripSubtitle">请尽快前往乘客位置</div>
+  </div>
+  <div class="trip-body">
+    <div class="passenger-card">
+      <div class="passenger-avatar">👤</div>
+      <div>
+        <div class="passenger-name" id="passengerName">乘客</div>
+        <div class="passenger-phone" id="passengerPhone">—</div>
+      </div>
+    </div>
+    <div class="trip-route">
+      <div class="trip-route-title">行程路线</div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-dot done" id="step1dot">✓</div>
+          <div class="step-content">
+            <div class="step-title">已接单</div>
+            <div class="step-desc">正在前往接客点</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-dot pending" id="step2dot">2</div>
+          <div class="step-content">
+            <div class="step-title">到达接客点</div>
+            <div class="step-desc" id="tripOriginAddr">—</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-dot pending" id="step3dot">3</div>
+          <div class="step-content">
+            <div class="step-title">行程中</div>
+            <div class="step-desc" id="tripDestAddr">—</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-dot pending" id="step4dot">4</div>
+          <div class="step-content">
+            <div class="step-title">到达目的地</div>
+            <div class="step-desc">行程结束</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="trip-action">
+    <button class="btn btn-primary" id="tripActionBtn" onclick="tripAction()">已到达接客点</button>
+  </div>
+</div>
+
+<script>
+// ----------------------------------------------------------------
+// 状态管理
+// ----------------------------------------------------------------
+let state = {
+  userId: null,
+  driverId: null,
+  driverInfo: null,
+  isOnline: false,
+  currentOrderId: null,
+  tripStatus: null,      // ACCEPTED / PICKING / IN_TRIP
+  pollTimer: null,
+  countdownTimer: null,
+  locationTimer: null
+};
+
+// ----------------------------------------------------------------
+// 页面切换
+// ----------------------------------------------------------------
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// ----------------------------------------------------------------
+// 登录
+// ----------------------------------------------------------------
+async function doLogin() {
+  const phone = document.getElementById('loginPhone').value.trim();
+  const code  = document.getElementById('loginCode').value.trim();
+  document.getElementById('loginErr').textContent = '';
+  if (!phone) { document.getElementById('loginErr').textContent = '请输入手机号'; return; }
+  if (!code)  { document.getElementById('loginErr').textContent = '请输入验证码'; return; }
+
+  const res = await api('/auth/login', 'POST', { phone, code, role: 'DRIVER' });
+  if (!res.ok) { document.getElementById('loginErr').textContent = res.msg || '登录失败'; return; }
+
+  state.userId = res.data.userId;
+  await loadDriverProfile();
+}
+
+async function loadDriverProfile() {
+  const res = await api('/driver/profile', 'GET');
+  if (!res.ok) {
+    // 司机资料不存在（新注册用户尚未创建 driver 记录）
+    showScreen('pending');
+    return;
+  }
+  state.driverInfo = res.data;
+  state.driverId = res.data.id;
+
+  // 审核未通过，进入审核中页
+  if (res.data.auditStatus !== 'APPROVED') {
+    showScreen('pending');
+    return;
+  }
+
+  renderHomeHeader();
+  showScreen('home');
+  startLocationReport();
+}
+
+function renderHomeHeader() {
+  const d = state.driverInfo;
+  document.getElementById('driverName').textContent  = d.name || '司机';
+  document.getElementById('driverPlate').textContent = (d.plate || '') + ' ' + (d.carModel || '');
+  document.getElementById('statRating').textContent  = d.rating ? parseFloat(d.rating).toFixed(1) : '5.0';
+}
+
+// ----------------------------------------------------------------
+// 上线 / 下线
+// ----------------------------------------------------------------
+async function toggleOnline() {
+  const online = document.getElementById('onlineSwitch').checked;
+  const res = await api('/driver/status', 'PUT', { online });
+  if (!res.ok) {
+    // 切换失败，回滚开关状态
+    document.getElementById('onlineSwitch').checked = !online;
+    alert(res.msg || '操作失败');
+    return;
+  }
+  state.isOnline = online;
+  document.getElementById('onlineLabel').textContent = online ? '在线' : '离线';
+  if (online) {
+    document.getElementById('statusIcon').textContent = '🟢';
+    document.getElementById('statusText').textContent = '在线中，等待接单...';
+    document.getElementById('statusText').className = 'status-text online';
+    startPollPendingOrder();
+  } else {
+    document.getElementById('statusIcon').textContent = '😴';
+    document.getElementById('statusText').textContent = '当前离线，请上线开始接单';
+    document.getElementById('statusText').className = 'status-text';
+    stopPollPendingOrder();
+  }
+}
+
+// ----------------------------------------------------------------
+// 轮询待接单通知（每 2s 轮询 /driver/pending-order）
+// ----------------------------------------------------------------
+function startPollPendingOrder() {
+  stopPollPendingOrder();
+  state.pollTimer = setInterval(pollPendingOrder, 2000);
+}
+
+function stopPollPendingOrder() {
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+}
+
+async function pollPendingOrder() {
+  if (state.currentOrderId) return; // 已有待处理订单，不重复弹窗
+  const res = await api('/driver/pending-order', 'GET');
+  if (!res.ok || !res.data.orderId) return;
+
+  const orderId = res.data.orderId;
+  // 查询订单详情用于弹窗展示（使用司机端专用查询接口）
+  const orderRes = await api('/order/' + orderId + '/driver-view', 'GET');
+  if (!orderRes.ok) return;
+
+  state.currentOrderId = orderId;
+  showOrderModal(orderRes.data);
+}
+
+// ----------------------------------------------------------------
+// 新订单弹窗
+// ----------------------------------------------------------------
+function showOrderModal(order) {
+  document.getElementById('modalOrigin').textContent = order.originAddr || '起点';
+  document.getElementById('modalDest').textContent   = order.destAddr   || '终点';
+  document.getElementById('modalPrice').textContent  = '¥' + (order.estimatedPrice || '—');
+  document.getElementById('orderModal').classList.add('show');
+  startCountdown(15);
+}
+
+function startCountdown(seconds) {
+  clearCountdown();
+  let s = seconds;
+  const el = document.getElementById('countdown');
+  el.textContent = s;
+  el.className = 'countdown';
+  state.countdownTimer = setInterval(() => {
+    s--;
+    el.textContent = s;
+    if (s <= 5) el.className = 'countdown urgent';
+    if (s <= 0) { clearCountdown(); rejectOrder(); }
+  }, 1000);
+}
+
+function clearCountdown() {
+  if (state.countdownTimer) { clearInterval(state.countdownTimer); state.countdownTimer = null; }
+}
+
+function rejectOrder() {
+  clearCountdown();
+  document.getElementById('orderModal').classList.remove('show');
+  state.currentOrderId = null;
+}
+
+async function acceptOrder() {
+  if (!state.currentOrderId) return;
+  clearCountdown();
+  document.getElementById('orderModal').classList.remove('show');
+
+  const res = await api('/order/' + state.currentOrderId + '/accept', 'POST');
+  if (!res.ok) {
+    alert(res.msg || '接单失败，订单已被抢走');
+    state.currentOrderId = null;
+    return;
+  }
+
+  stopPollPendingOrder();
+  state.tripStatus = 'ACCEPTED';
+  renderTripScreen(res.data);
+  showScreen('trip');
+}
+
+// ----------------------------------------------------------------
+// 行程中页
+// ----------------------------------------------------------------
+function renderTripScreen(order) {
+  document.getElementById('tripOriginAddr').textContent = order.originAddr || '—';
+  document.getElementById('tripDestAddr').textContent   = order.destAddr   || '—';
+  updateTripStep('ACCEPTED');
+}
+
+function updateTripStep(status) {
+  const steps = {
+    ACCEPTED: { title: '前往接客点',   subtitle: '请尽快前往乘客位置',    btn: '已到达接客点',        step: 1 },
+    PICKING:  { title: '等待乘客上车', subtitle: '已到达接客点，等待乘客', btn: '乘客已上车，开始行程', step: 2 },
+    IN_TRIP:  { title: '行程中',       subtitle: '正在前往目的地',         btn: '到达目的地，结束行程', step: 3 }
+  };
+  const s = steps[status];
+  if (!s) return;
+  document.getElementById('tripTitle').textContent     = s.title;
+  document.getElementById('tripSubtitle').textContent  = s.subtitle;
+  document.getElementById('tripActionBtn').textContent = s.btn;
+
+  // 更新步骤点样式：已完成=绿色✓，当前=橙色，未到=灰色
+  for (let i = 1; i <= 4; i++) {
+    const dot = document.getElementById('step' + i + 'dot');
+    if (i <= s.step)           { dot.className = 'step-dot done';    dot.textContent = '✓'; }
+    else if (i === s.step + 1) { dot.className = 'step-dot active';  dot.textContent = i; }
+    else                       { dot.className = 'step-dot pending'; dot.textContent = i; }
+  }
+}
+
+async function tripAction() {
+  if (!state.currentOrderId) return;
+  let endpoint;
+  let nextStatus;
+  if      (state.tripStatus === 'ACCEPTED') { endpoint = '/order/' + state.currentOrderId + '/arrive'; nextStatus = 'PICKING'; }
+  else if (state.tripStatus === 'PICKING')  { endpoint = '/order/' + state.currentOrderId + '/start';  nextStatus = 'IN_TRIP'; }
+  else if (state.tripStatus === 'IN_TRIP')  { endpoint = '/order/' + state.currentOrderId + '/finish'; nextStatus = 'FINISHED'; }
+  else return;
+
+  const res = await api(endpoint, 'POST');
+  if (!res.ok) { alert(res.msg || '操作失败'); return; }
+
+  if (nextStatus === 'FINISHED') {
+    const price = res.data.actualPrice || res.data.estimatedPrice;
+    alert('行程结束！实际费用：¥' + price);
+    state.currentOrderId = null;
+    state.tripStatus = null;
+    // 行程结束后恢复在线状态，重新开始轮询
+    state.isOnline = true;
+    document.getElementById('onlineSwitch').checked = true;
+    document.getElementById('onlineLabel').textContent = '在线';
+    document.getElementById('statusIcon').textContent = '🟢';
+    document.getElementById('statusText').textContent = '在线中，等待接单...';
+    document.getElementById('statusText').className = 'status-text online';
+    startPollPendingOrder();
+    showScreen('home');
+  } else {
+    state.tripStatus = nextStatus;
+    updateTripStep(nextStatus);
+  }
+}
+
+// ----------------------------------------------------------------
+// 位置上报（每 5s 上报一次 mock 坐标，仅在线时上报）
+// ----------------------------------------------------------------
+function startLocationReport() {
+  if (state.locationTimer) return;
+  state.locationTimer = setInterval(() => {
+    if (!state.isOnline) return;
+    // mock 坐标：北京附近随机偏移，模拟司机移动
+    const lat = 39.9 + (Math.random() - 0.5) * 0.1;
+    const lng = 116.4 + (Math.random() - 0.5) * 0.1;
+    api('/driver/location', 'POST', { lat, lng, timestamp: Date.now(), city: 'default' });
+  }, 5000);
+}
+
+// ----------------------------------------------------------------
+// 退出登录
+// ----------------------------------------------------------------
+function doLogout() {
+  api('/auth/logout', 'POST');
+  stopPollPendingOrder();
+  if (state.locationTimer) { clearInterval(state.locationTimer); }
+  state = { userId: null, driverId: null, driverInfo: null, isOnline: false,
+            currentOrderId: null, tripStatus: null, pollTimer: null,
+            countdownTimer: null, locationTimer: null };
+  showScreen('login');
+}
+
+// ----------------------------------------------------------------
+// HTTP 工具
+// ----------------------------------------------------------------
+async function api(url, method, body) {
+  try {
+    const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include' };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(url, opts);
+    return await r.json();
+  } catch (e) {
+    return { ok: false, msg: '网络错误' };
+  }
+}
+</script>
+</body>
+</html>
