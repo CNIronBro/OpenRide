@@ -17,8 +17,7 @@ import java.util.Map;
  * 正常派单链路：
  *   下单 → dispatch.exchange(dispatch.new) → dispatch.queue
  *        → DispatchConsumer 处理后发延迟消息
- *        → delay.exchange(dispatch.delay) → dispatch.delay.queue(TTL=15s)
- *        → 到期后 DLX 路由 → dispatch.exchange(dispatch.retry) → dispatch.retry.queue
+ *        → dispatch.exchange(dispatch.retry, x-delay=15000) → [延迟 15s] → dispatch.retry.queue
  *        → RetryConsumer 检查是否已接单，未接单则重新派或发取消消息
  *        → dispatch.exchange(dispatch.cancel) → cancel.queue
  *        → CancelConsumer 执行自动取消
@@ -28,10 +27,9 @@ import java.util.Map;
  *   → dispatch.dlx → dispatch.dlq（人工处理或告警）
  *
  * 延迟队列实现原理：
- *   dispatch.delay.queue 本身不绑定消费者，设置 x-message-ttl=15000ms + x-dead-letter-exchange。
- *   消息在队列中等待 15s 后自动过期，RabbitMQ 将其路由到 DLX（dispatch.exchange），
- *   再通过 routing key=dispatch.retry 投递到 dispatch.retry.queue。
- *   这是 RabbitMQ 实现延迟队列的标准方式（TTL + DLX），无需额外插件。
+ *   使用 rabbitmq-delayed-message-exchange 插件，dispatch.exchange 声明为 x-delayed-message 类型。
+ *   发送延迟消息时在消息 header 中设置 x-delay（毫秒），Broker 持有消息直到延迟到期后再路由。
+ *   相比 TTL+DLX 方案，无需额外的 delay 队列和交换机，拓扑更简洁。
  */
 @Configuration
 public class RabbitMqConfig {
@@ -40,19 +38,15 @@ public class RabbitMqConfig {
     // 常量：交换机名称
     // ----------------------------------------------------------------
 
-    /** 派单主交换机（direct），负责 dispatch.new / dispatch.retry / dispatch.cancel 路由 */
+    /**
+     * 派单主交换机（x-delayed-message 类型）。
+     * 使用 rabbitmq-delayed-message-exchange 插件，支持通过消息 header x-delay（毫秒）实现延迟投递。
+     * 同时承担普通路由（dispatch.new / dispatch.cancel）和延迟路由（dispatch.retry）职责。
+     */
     public static final String DISPATCH_EXCHANGE = "dispatch.exchange";
 
     /** 死信交换机（direct），消费失败的消息路由到此处 */
     public static final String DISPATCH_DLX = "dispatch.dlx";
-
-    /**
-     * 延迟交换机（direct），用于接收延迟消息的投递。
-     * dispatch.delay.queue 的消息 TTL 到期后，DLX 指向 dispatch.exchange，
-     * 所以延迟消息最终还是由 dispatch.exchange 路由到 dispatch.retry.queue。
-     * 此处 delay.exchange 作为延迟消息的入口交换机（与 dispatch.exchange 分开，职责更清晰）。
-     */
-    public static final String DELAY_EXCHANGE = "delay.exchange";
 
     // ----------------------------------------------------------------
     // 常量：队列名称
@@ -60,12 +54,6 @@ public class RabbitMqConfig {
 
     /** 派单队列：DispatchConsumer 消费，执行 GEO 召回 + 评分 + 推送 */
     public static final String DISPATCH_QUEUE = "dispatch.queue";
-
-    /**
-     * 延迟队列：不绑定消费者，消息在此等待 15s 后自动过期转发到 dispatch.retry.queue。
-     * 通过 x-message-ttl + x-dead-letter-exchange 实现延迟效果。
-     */
-    public static final String DISPATCH_DELAY_QUEUE = "dispatch.delay.queue";
 
     /** 重试队列：RetryConsumer 消费，检查接单状态，决定继续派或取消 */
     public static final String DISPATCH_RETRY_QUEUE = "dispatch.retry.queue";
@@ -83,10 +71,7 @@ public class RabbitMqConfig {
     /** 新订单派单路由 key */
     public static final String ROUTING_DISPATCH_NEW = "dispatch.new";
 
-    /** 延迟消息路由 key（投递到 dispatch.delay.queue） */
-    public static final String ROUTING_DISPATCH_DELAY = "dispatch.delay";
-
-    /** 延迟到期后重试路由 key（从 DLX 路由到 dispatch.retry.queue） */
+    /** 延迟重试路由 key（发送时携带 x-delay header，到期后路由到 dispatch.retry.queue） */
     public static final String ROUTING_DISPATCH_RETRY = "dispatch.retry";
 
     /** 取消路由 key */
@@ -96,20 +81,24 @@ public class RabbitMqConfig {
     // 交换机声明
     // ----------------------------------------------------------------
 
+    /**
+     * 派单主交换机，类型为 x-delayed-message（插件提供）。
+     *
+     * x-delayed-message 是插件注册的自定义交换机类型，内部实际路由类型通过 x-delayed-type 参数指定。
+     * 发送消息时在 header 中设置 x-delay（毫秒），Broker 会持有消息直到延迟到期后再按 routing key 路由。
+     * 非延迟消息（不带 x-delay header）会立即路由，与普通 direct 交换机行为一致。
+     */
     @Bean
-    public DirectExchange dispatchExchange() {
-        // durable=true：RabbitMQ 重启后交换机不丢失
-        return ExchangeBuilder.directExchange(DISPATCH_EXCHANGE).durable(true).build();
+    public CustomExchange dispatchExchange() {
+        Map<String, Object> args = new HashMap<>();
+        // 指定底层路由类型为 direct，插件在延迟到期后按 direct 规则路由消息
+        args.put("x-delayed-type", "direct");
+        return new CustomExchange(DISPATCH_EXCHANGE, "x-delayed-message", true, false, args);
     }
 
     @Bean
     public DirectExchange dispatchDlx() {
         return ExchangeBuilder.directExchange(DISPATCH_DLX).durable(true).build();
-    }
-
-    @Bean
-    public DirectExchange delayExchange() {
-        return ExchangeBuilder.directExchange(DELAY_EXCHANGE).durable(true).build();
     }
 
     // ----------------------------------------------------------------
@@ -125,25 +114,6 @@ public class RabbitMqConfig {
         return QueueBuilder.durable(DISPATCH_QUEUE)
                 .withArgument("x-dead-letter-exchange", DISPATCH_DLX)
                 .withArgument("x-dead-letter-routing-key", "dlq")
-                .build();
-    }
-
-    /**
-     * 延迟队列（核心）
-     *
-     * 关键参数说明：
-     * - x-message-ttl=15000：队列中所有消息的统一 TTL（15s），到期后自动转发到 DLX
-     * - x-dead-letter-exchange=dispatch.exchange：TTL 到期后路由到派单主交换机
-     * - x-dead-letter-routing-key=dispatch.retry：到期消息用此 routing key 路由到 dispatch.retry.queue
-     *
-     * 注意：此队列不绑定任何消费者，消息只在此"等待"，不会被消费。
-     */
-    @Bean
-    public Queue dispatchDelayQueue() {
-        return QueueBuilder.durable(DISPATCH_DELAY_QUEUE)
-                .withArgument("x-message-ttl", 15_000)                    // 15s 延迟
-                .withArgument("x-dead-letter-exchange", DISPATCH_EXCHANGE) // 到期路由到派单主交换机
-                .withArgument("x-dead-letter-routing-key", ROUTING_DISPATCH_RETRY) // 到期 routing key
                 .build();
     }
 
@@ -186,32 +156,20 @@ public class RabbitMqConfig {
 
     /** dispatch.exchange + dispatch.new → dispatch.queue */
     @Bean
-    public Binding bindingDispatchQueue(Queue dispatchQueue, DirectExchange dispatchExchange) {
-        return BindingBuilder.bind(dispatchQueue).to(dispatchExchange).with(ROUTING_DISPATCH_NEW);
+    public Binding bindingDispatchQueue(Queue dispatchQueue, CustomExchange dispatchExchange) {
+        return BindingBuilder.bind(dispatchQueue).to(dispatchExchange).with(ROUTING_DISPATCH_NEW).noargs();
     }
 
-    /**
-     * delay.exchange + dispatch.delay → dispatch.delay.queue
-     * 下单后发延迟消息时，投递到 delay.exchange，routing key=dispatch.delay
-     */
+    /** dispatch.exchange + dispatch.retry → dispatch.retry.queue（延迟消息到期后路由到此） */
     @Bean
-    public Binding bindingDelayQueue(Queue dispatchDelayQueue, DirectExchange delayExchange) {
-        return BindingBuilder.bind(dispatchDelayQueue).to(delayExchange).with(ROUTING_DISPATCH_DELAY);
-    }
-
-    /**
-     * dispatch.exchange + dispatch.retry → dispatch.retry.queue
-     * dispatch.delay.queue 中消息 TTL 到期后，DLX 将消息路由到此处
-     */
-    @Bean
-    public Binding bindingRetryQueue(Queue dispatchRetryQueue, DirectExchange dispatchExchange) {
-        return BindingBuilder.bind(dispatchRetryQueue).to(dispatchExchange).with(ROUTING_DISPATCH_RETRY);
+    public Binding bindingRetryQueue(Queue dispatchRetryQueue, CustomExchange dispatchExchange) {
+        return BindingBuilder.bind(dispatchRetryQueue).to(dispatchExchange).with(ROUTING_DISPATCH_RETRY).noargs();
     }
 
     /** dispatch.exchange + dispatch.cancel → cancel.queue */
     @Bean
-    public Binding bindingCancelQueue(Queue cancelQueue, DirectExchange dispatchExchange) {
-        return BindingBuilder.bind(cancelQueue).to(dispatchExchange).with(ROUTING_DISPATCH_CANCEL);
+    public Binding bindingCancelQueue(Queue cancelQueue, CustomExchange dispatchExchange) {
+        return BindingBuilder.bind(cancelQueue).to(dispatchExchange).with(ROUTING_DISPATCH_CANCEL).noargs();
     }
 
     /** dispatch.dlx + dlq → dispatch.dlq（死信落地） */

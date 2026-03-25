@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * 派单超时重试消费者
  *
- * 消费 dispatch.retry.queue 中的超时重试消息（由 dispatch.delay.queue TTL=15s 到期后路由而来）。
+ * 消费 dispatch.retry.queue 中的超时重试消息（由 dispatch.exchange x-delay=15s 延迟到期后路由而来）。
  *
  * 核心逻辑：
  * 1. 幂等校验：比较消息中的 dispatchIndex 与 Redis 中当前索引是否一致
@@ -301,8 +301,7 @@ public class RetryConsumer {
     /**
      * 发送无司机等待延迟消息
      *
-     * 复用 dispatch.delay.queue（TTL=15s），携带 noDriverRetry=true 标记，
-     * 15s 后由 RetryConsumer 重新 GEO 召回。
+     * 通过 x-delay header 实现 15s 延迟，15s 后由 RetryConsumer 重新 GEO 召回。
      */
     private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
         Map<String, Object> msg = new HashMap<>();
@@ -311,9 +310,13 @@ public class RetryConsumer {
         msg.put("noDriverRetry", true);
         msg.put("waitedSeconds", waitedSeconds);
         rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DELAY_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
-                msg
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
+                msg,
+                m -> {
+                    m.getMessageProperties().setHeader("x-delay", 15_000);
+                    return m;
+                }
         );
     }
 
@@ -348,15 +351,19 @@ public class RetryConsumer {
         }
     }
 
-    /** 发送延迟消息 */
+    /** 发送延迟消息（x-delay=15s） */
     private void sendDelayMessage(Long orderId, int dispatchIndex) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);
         msg.put("dispatchIndex", dispatchIndex);
         rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DELAY_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
-                msg
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
+                msg,
+                m -> {
+                    m.getMessageProperties().setHeader("x-delay", 15_000);
+                    return m;
+                }
         );
     }
 

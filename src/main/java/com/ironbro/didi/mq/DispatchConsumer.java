@@ -46,7 +46,7 @@ import java.util.concurrent.TimeUnit;
  * 3. 将候选列表序列化存入 Redis（key=order:candidates:{orderId}，TTL=10min）
  * 4. 将当前派单索引（0）存入 Redis（key=order:dispatch:index:{orderId}）
  * 5. 推送新订单通知给最优司机（写 Redis，司机端轮询）
- * 6. 发送延迟消息到 dispatch.delay.queue（TTL=15s），消息体携带 orderId + dispatchIndex=0
+ * 6. 发送延迟消息到 dispatch.exchange（x-delay=15s），消息体携带 orderId + dispatchIndex=0
  *
  * 幂等说明（阶段 7 实现）：
  * 消费前用 Redisson tryLock（key=lock:dispatch:{orderId}），防止同一订单的派单消息
@@ -128,14 +128,19 @@ public class DispatchConsumer {
         String city = (String) body.getOrDefault("city", "default");
 
         // 7.1 派单幂等锁：防止同一订单的派单消息被多个消费者实例并发消费两次
-        // 场景：MQ 消息重投（网络抖动导致 ACK 未到达 Broker）或多实例部署时消息被重复投递
-        // tryLock(waitTime=0)：不等待，立即返回。若锁已被持有，说明另一实例正在处理，直接 ACK 跳过
-        // leaseTime=30s：足够覆盖一次完整派单流程（GEO 召回 + 评分 + Redis 写入 + MQ 发送），超时自动释放防死锁
+        // QUESTION 此处为什么会出现多个消费者消费同一订单的情况？
+        // QUESTION 代码做了消费者确认机制，消费者A执行doDispatch()后，如果在发送ACK前网络断开或服务崩溃，MQ会因为没有收到ACK而重新投递该消息。
+        // QUESTION 如果此时A持有的分布式锁还未释放或未过期，那么消费者B再次消费时将拿不到锁，从而直接ACK跳过，避免短时间内的重复处理。
+        // QUESTION 但如果锁已经释放或过期，那么B仍可能重新拿到锁并再次执行doDispatch()
+        // QUESTION 第一次消费不受影响，会正常处理业务，因为已经执行了doDispatch()。
         String lockKey = "lock:dispatch:" + orderId;
         RLock lock = redissonClient.getLock(lockKey);
         boolean locked = false;
         try {
+            // 0:不等待，一上来就抢锁，抢不到就return false。
+            // 30：锁自动释放时间为30s，30秒后Redis会自动删掉这把锁，避免死锁
             locked = lock.tryLock(0, 30, TimeUnit.SECONDS);
+
             if (!locked) {
                 // 未获取到锁：说明另一实例正在处理此订单的派单，直接 ACK 跳过（幂等）
                 log.info("派单幂等锁未获取，跳过重复消费 orderId={}", orderId);
@@ -164,6 +169,14 @@ public class DispatchConsumer {
      * @param originLng 下单位置经度
      * @param city      城市标识
      */
+    // QUESTION 在之前只做redission锁仍然不够稳，因为如果消费者B消费前消费者A已经释放了锁，那么仍然会出现重复消费的情况，所以要在业务层面再加一层保险。
+    // QUESTION 业务层面的这层保险就是“检查订单是否仍处于派单中状态”。
+    // QUESTION 只有业务层面的保险可以吗？不加redission锁可以吗？
+    // QUESTION 也不行！因为假设不加redission锁，同一个订单来了两条重复消息，被两个消费者A、B同时拿到，
+    // QUESTION 此时查出来的订单状态都处于派单中，那么都可以继续执行，又重复消费了。
+    // QUESTION redission锁的价值是限制同一个订单，同一时刻只允许一个消费者进doDispatch；
+    // QUESTION 订单状态校验的价值是校验业务正确性，因为即使拿到了锁，也不代表订单应该派。
+    // QUESTION 可能由于网络波动导致重复发了两条一样的订单到队列中，所以必须加上业务校验。
     private void doDispatch(Long orderId, double originLat, double originLng, String city) {
         // 检查订单是否仍处于派单中状态（防止重复消费时订单已被取消或接单）
         Order order = orderMapper.selectById(orderId);
@@ -229,7 +242,7 @@ public class DispatchConsumer {
         // 记录派单日志
         saveDispatchLog(orderId, targetDriverId, DispatchAction.DISPATCHED, "初次派单，index=0");
 
-        // 5.3.5 发送延迟消息（TTL=15s），消息体携带 orderId + dispatchIndex=0
+        // 5.3.5 发送延迟消息（x-delay=15s），消息体携带 orderId + dispatchIndex=0
         // 15s 后若司机未接单，RetryConsumer 将尝试派给下一位候选司机
         sendDelayMessage(orderId, 0);
 
@@ -319,10 +332,11 @@ public class DispatchConsumer {
     }
 
     /**
-     * 发送延迟消息到 dispatch.delay.queue
+     * 发送延迟消息
      *
-     * 消息体携带 orderId + dispatchIndex，用于 RetryConsumer 的幂等校验：
-     * 若 15s 后消息到期时，Redis 中的当前索引已变更（说明已有新一轮派单），则忽略此消息。
+     * 通过 rabbitmq-delayed-message-exchange 插件实现 15s 延迟：
+     * 在消息 header 中设置 x-delay=15000（毫秒），Broker 持有消息直到延迟到期后路由到 dispatch.retry.queue。
+     * 消息体携带 orderId + dispatchIndex，用于 RetryConsumer 的幂等校验。
      *
      * @param orderId       订单 ID
      * @param dispatchIndex 当前派单的候选列表下标
@@ -332,20 +346,20 @@ public class DispatchConsumer {
         msg.put("orderId", orderId);
         msg.put("dispatchIndex", dispatchIndex);
 
-        // 投递到 delay.exchange，routing key=dispatch.delay
-        // dispatch.delay.queue 设置了 x-message-ttl=15000，15s 后自动转发到 dispatch.retry.queue
+        // x-delay header 单位为毫秒，插件据此延迟投递
         rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DELAY_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
-                msg
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
+                msg,
+                m -> {
+                    m.getMessageProperties().setHeader("x-delay", 15_000);
+                    return m;
+                }
         );
     }
 
     /**
      * 无司机时发延迟消息，等待 15s 后由 RetryConsumer 重新 GEO 召回
-     *
-     * 消息体携带 noDriverRetry=true 和 waitedSeconds，RetryConsumer 据此走无司机重试分支。
-     * waitedSeconds 累计超过 MAX_NO_DRIVER_WAIT_SECONDS（60s）时，RetryConsumer 才真正取消订单。
      *
      * @param orderId      订单 ID
      * @param waitedSeconds 已等待秒数（每轮 +15）
@@ -357,9 +371,13 @@ public class DispatchConsumer {
         msg.put("noDriverRetry", true);
         msg.put("waitedSeconds", waitedSeconds);
         rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DELAY_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
-                msg
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
+                msg,
+                m -> {
+                    m.getMessageProperties().setHeader("x-delay", 15_000);
+                    return m;
+                }
         );
     }
 
