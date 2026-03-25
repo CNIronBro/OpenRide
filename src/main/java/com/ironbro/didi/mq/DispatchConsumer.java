@@ -341,12 +341,13 @@ public class DispatchConsumer {
      * @param orderId       订单 ID
      * @param dispatchIndex 当前派单的候选列表下标
      */
+    // QUESTION
     private void sendDelayMessage(Long orderId, int dispatchIndex) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);
         msg.put("dispatchIndex", dispatchIndex);
 
-        // x-delay header 单位为毫秒，插件据此延迟投递
+        // 延迟15s
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,
@@ -364,6 +365,7 @@ public class DispatchConsumer {
      * @param orderId      订单 ID
      * @param waitedSeconds 已等待秒数（每轮 +15）
      */
+    // QUESTION
     private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);

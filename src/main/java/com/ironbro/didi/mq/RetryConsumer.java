@@ -87,6 +87,7 @@ public class RetryConsumer {
      *   "dispatchIndex": Integer  // 发送此延迟消息时的派单索引
      * }
      */
+    // QUESTION 逻辑差不多
     @RabbitListener(queues = RabbitMqConfig.DISPATCH_RETRY_QUEUE)
     public void onRetry(Message message, Channel channel) throws IOException {
         long deliveryTag = message.getMessageProperties().getDeliveryTag();
@@ -103,9 +104,6 @@ public class RetryConsumer {
         int msgDispatchIndex = ((Number) body.get("dispatchIndex")).intValue();
 
         // 7.2 补偿幂等锁：防止同一超时消息被多个消费者实例并发处理
-        // 场景：多实例部署时 MQ 消息被重复投递，或网络抖动导致 ACK 未到达 Broker 后重投
-        // tryLock(waitTime=0)：不等待，立即返回。若锁已被持有，说明另一实例正在处理，直接 ACK 跳过
-        // leaseTime=30s：足够覆盖一次完整重试流程，超时自动释放防死锁
         // 注意：此锁与 dispatchIndex 幂等校验是两层独立保护，互为补充
         String lockKey = "lock:compensate:" + orderId;
         RLock lock = redissonClient.getLock(lockKey);
@@ -170,6 +168,7 @@ public class RetryConsumer {
         // 5.5.2 订单状态校验
         Order order = orderMapper.selectById(orderId);
         if (order == null || order.getStatus() != OrderStatus.DISPATCHING) {
+            // 理想链路：司机已接单，所以订单状态变为ACCEPTED，不等于DISPATCHING，所以直接return
             log.info("订单不在派单中状态，忽略重试 orderId={} status={}",
                     orderId, order != null ? order.getStatus() : "null");
             return;
@@ -287,7 +286,9 @@ public class RetryConsumer {
             return;
         }
 
+        // 候选司机列表
         redisTemplate.opsForValue().set(candidatesKey, candidatesJson, Duration.ofMinutes(10));
+        // 当前派到了第几个司机。
         redisTemplate.opsForValue().set(indexKey, "0", Duration.ofMinutes(10));
 
         Long targetDriverId = nearbyDriverIds.get(0);
@@ -295,39 +296,21 @@ public class RetryConsumer {
         updateDriverDispatchStats(targetDriverId);
         saveDispatchLog(orderId, targetDriverId, DispatchAction.DISPATCHED,
                 "无司机等待后找到司机，开始派单 waitedSeconds=" + nextWaited);
+        // 超时兜底，此时没有设置noDriverRetry=true，所以不会进入之前找不到司机重试的路径
         sendDelayMessage(orderId, 0);
-    }
-
-    /**
-     * 发送无司机等待延迟消息
-     *
-     * 通过 x-delay header 实现 15s 延迟，15s 后由 RetryConsumer 重新 GEO 召回。
-     */
-    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
-        Map<String, Object> msg = new HashMap<>();
-        msg.put("orderId", orderId);
-        msg.put("dispatchIndex", -1);   // 无司机重试不使用 dispatchIndex，填 -1 占位
-        msg.put("noDriverRetry", true);
-        msg.put("waitedSeconds", waitedSeconds);
-        rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DISPATCH_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
-                msg,
-                m -> {
-                    m.getMessageProperties().setHeader("x-delay", 15_000);
-                    return m;
-                }
-        );
     }
 
     /** 推送新订单通知给司机（写 Redis，司机端轮询）
      *
      * 重复推送防护：SADD 原子操作检查司机是否已被推送过此订单，
      * 防止重试链路中同一司机被重复推送（如候选列表循环或消息重投场景）。
+     * 也是个幂等，司机不能被重复派单。
      */
+    // QUESTION
     private void pushOrderToDriver(Long orderId, Long driverId) {
         // 7.3 重复推送防护：与 DispatchConsumer 共用同一 Redis Set
         String dispatchedKey = "order:dispatched:drivers:" + orderId;
+        // 如果这个司机原来不在集合里，返回1；如果已在的话，返回0。
         Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
         redisTemplate.expire(dispatchedKey, Duration.ofMinutes(10));
 
@@ -337,6 +320,7 @@ public class RetryConsumer {
         }
 
         String key = "driver:pending:order:" + driverId;
+        // 司机被派单后的20s等待时间内不能接其他订单。
         redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(20));
     }
 
@@ -352,10 +336,34 @@ public class RetryConsumer {
     }
 
     /** 发送延迟消息（x-delay=15s） */
+    // QUESTION
     private void sendDelayMessage(Long orderId, int dispatchIndex) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);
         msg.put("dispatchIndex", dispatchIndex);
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
+                msg,
+                m -> {
+                    m.getMessageProperties().setHeader("x-delay", 15_000);
+                    return m;
+                }
+        );
+    }
+
+    /**
+     * 发送无司机等待延迟消息
+     *
+     * 通过 x-delay header 实现 15s 延迟，15s 后由 RetryConsumer 重新 GEO 召回。
+     */
+    // QUESTION
+    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
+        msg.put("dispatchIndex", -1);   // 无司机重试不使用 dispatchIndex，填 -1 占位
+        msg.put("noDriverRetry", true);
+        msg.put("waitedSeconds", waitedSeconds);
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,
