@@ -1,6 +1,8 @@
 package com.ironbro.didi.config;
 
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -216,5 +218,15 @@ public class RabbitMqConfig {
     @Bean
     public Binding bindingDlq(Queue dispatchDlq, DirectExchange dispatchDlx) {
         return BindingBuilder.bind(dispatchDlq).to(dispatchDlx).with("dlq");
+    }
+
+    /**
+     * 使用 Jackson JSON 序列化消息体。
+     * 配置后 RabbitMQ 管理后台可直接读取消息内容，消费者也无需手动反序列化。
+     * Spring AMQP 会自动检测此 Bean 并替换默认的 Java 序列化方式。
+     */
+    @Bean
+    public MessageConverter jsonMessageConverter() {
+        return new Jackson2JsonMessageConverter();
     }
 }

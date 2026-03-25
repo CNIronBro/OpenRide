@@ -96,12 +96,22 @@ public class DispatchConsumer {
      *   "city":      String
      * }
      *
-     * @param message RabbitMQ 原始消息（用于手动 ACK）
-     * @param channel RabbitMQ Channel（用于手动 ACK/NACK）
+     * @param message Spring AMQP 对 RabbitMQ 原始消息的封装，包含两部分：
+     *                - message.getBody()：消息体的原始字节数组，用 Jackson 反序列化成 Map
+     *                - message.getMessageProperties().getDeliveryTag()：Broker 为这条消息分配的唯一序号
+     *                  （在当前 Channel 内单调递增），ACK/NACK 时用它告诉 Broker "我确认的是哪条消息"
+     * @param channel RabbitMQ 底层 TCP 通道，用于向 Broker 发送 ACK/NACK 信号：
+     *                - basicAck(deliveryTag, false)：处理成功，Broker 删除该消息
+     *                - basicNack(deliveryTag, false, requeue=false)：处理失败，不重入队列，路由到死信队列
+     *                - 第二个参数 multiple=false 表示只确认这一条，不批量确认
+     *                使用手动 ACK 而非自动 ACK 的原因：自动 ACK 在消息到达时立即确认，
+     *                业务处理中途崩溃会导致消息丢失；手动 ACK 确保成功处理后才确认，
+     *                失败时进死信队列便于排查，幂等重复时主动 ACK 丢弃避免重入队列。
+     *                注意：Channel 操作会抛 IOException，因此方法签名需声明 throws IOException
      */
     @RabbitListener(queues = RabbitMqConfig.DISPATCH_QUEUE)
     public void onDispatch(Message message, Channel channel) throws IOException {
-        long deliveryTag = message.getMessageProperties().getDeliveryTag();
+        long deliveryTag = message.getMessageProperties().getDeliveryTag();//消息唯一序号。
         Map<String, Object> body;
         try {
             body = objectMapper.readValue(message.getBody(), new TypeReference<>() {});
@@ -168,8 +178,10 @@ public class DispatchConsumer {
                 originLat, originLng, DISPATCH_RADIUS_KM, city, MAX_CANDIDATES);
 
         if (nearbyDriverIds.isEmpty()) {
-            log.info("附近无在线司机，直接取消 orderId={}", orderId);
-            sendCancelMessage(orderId, "附近无可用司机");
+            // 附近暂无在线司机，不立即取消，发延迟消息等待司机上线
+            // waitedSeconds=0 表示本次是第一次无司机，RetryConsumer 收到后会重新 GEO 召回
+            log.info("附近无在线司机，等待重试 orderId={}", orderId);
+            sendNoDriverDelayMessage(orderId, 0);
             return;
         }
 
@@ -181,8 +193,9 @@ public class DispatchConsumer {
                         .eq(Driver::getAuditStatus, AuditStatus.APPROVED));
 
         if (drivers.isEmpty()) {
-            log.info("候选司机均不可用，直接取消 orderId={}", orderId);
-            sendCancelMessage(orderId, "附近无可用司机");
+            // GEO 召回有结果但 DB 查询后均不可用（状态变更竞态），同样等待重试
+            log.info("候选司机均不可用，等待重试 orderId={}", orderId);
+            sendNoDriverDelayMessage(orderId, 0);
             return;
         }
 
@@ -321,6 +334,28 @@ public class DispatchConsumer {
 
         // 投递到 delay.exchange，routing key=dispatch.delay
         // dispatch.delay.queue 设置了 x-message-ttl=15000，15s 后自动转发到 dispatch.retry.queue
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DELAY_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
+                msg
+        );
+    }
+
+    /**
+     * 无司机时发延迟消息，等待 15s 后由 RetryConsumer 重新 GEO 召回
+     *
+     * 消息体携带 noDriverRetry=true 和 waitedSeconds，RetryConsumer 据此走无司机重试分支。
+     * waitedSeconds 累计超过 MAX_NO_DRIVER_WAIT_SECONDS（60s）时，RetryConsumer 才真正取消订单。
+     *
+     * @param orderId      订单 ID
+     * @param waitedSeconds 已等待秒数（每轮 +15）
+     */
+    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
+        msg.put("dispatchIndex", -1);       // 无司机重试不使用 dispatchIndex，填 -1 占位
+        msg.put("noDriverRetry", true);
+        msg.put("waitedSeconds", waitedSeconds);
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DELAY_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_DELAY,

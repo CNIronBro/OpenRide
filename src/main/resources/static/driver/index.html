@@ -532,8 +532,8 @@ function startLocationReport() {
   state.locationTimer = setInterval(() => {
     if (!state.isOnline) return;
     // mock 坐标：北京附近随机偏移，模拟司机移动
-    const lat = 39.9 + (Math.random() - 0.5) * 0.1;
-    const lng = 116.4 + (Math.random() - 0.5) * 0.1;
+    const lat = 39.9 + (Math.random() - 0.5) * 0.01;
+    const lng = 116.4 + (Math.random() - 0.5) * 0.01;
     api('/driver/location', 'POST', { lat, lng, timestamp: Date.now(), city: 'default' });
   }, 5000);
 }
@@ -610,7 +610,9 @@ async function api(url, method, body) {
     const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'include' };
     if (body) opts.body = JSON.stringify(body);
     const r = await fetch(url, opts);
-    return await r.json();
+    const json = await r.json();
+    // 将后端 Result 的 code===200 映射为 ok 字段，统一前端判断方式
+    return { ok: json.code === 200, msg: json.message, data: json.data };
   } catch (e) {
     return { ok: false, msg: '网络错误' };
   }

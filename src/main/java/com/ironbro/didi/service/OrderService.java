@@ -18,6 +18,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
@@ -83,20 +85,29 @@ public class OrderService {
 
         orderMapper.insert(order);
 
-        // 发送派单消息
-        // 消息体携带 orderId 和下单位置（供 DispatchConsumer 做 GEO 召回）
-        Map<String, Object> msg = new HashMap<>();
-        msg.put("orderId", order.getId());
+        // 必须在事务提交后再发 MQ 消息，否则消费者可能在事务提交前查询订单，导致读不到数据
+        // 场景：@Transactional 事务内直接发 MQ，消息极快被消费，但 INSERT 尚未提交，
+        //       DispatchConsumer.selectById 返回 null，订单被误判为"不在派单中状态"而跳过
+        // TransactionSynchronizationManager.registerSynchronization 注册事务提交后回调，
+        // afterCommit() 在当前事务成功提交后才执行，保证消费者能读到已提交的订单数据
+        final Long orderId = order.getId();
+        final Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
         msg.put("originLat", req.originLat());
         msg.put("originLng", req.originLng());
         msg.put("city", req.city());
 
-        // 投递到 dispatch.exchange，routing key=dispatch.new → dispatch.queue
-        rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DISPATCH_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_NEW,
-                msg
-        );
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                // 投递到 dispatch.exchange，routing key=dispatch.new → dispatch.queue
+                rabbitTemplate.convertAndSend(
+                        RabbitMqConfig.DISPATCH_EXCHANGE,
+                        RabbitMqConfig.ROUTING_DISPATCH_NEW,
+                        msg
+                );
+            }
+        });
 
         log.info("下单成功，orderId={} passengerId={}", order.getId(), passengerId);
         return order;

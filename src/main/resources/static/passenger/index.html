@@ -395,6 +395,7 @@ let currentOrderId = null;   // 当前进行中的订单 ID
 let pollTimer = null;        // 订单状态轮询定时器
 let currentOrder = null;     // 当前订单完整数据（支付页使用）
 let reviewStar = 5;          // 评价星级，默认 5 星
+let lastEstimatedPrice = null; // 最近一次预估价格（由 queryEstimate 写入，下单时使用）
 
 // ---- 通用请求 ----
 async function api(path, opts = {}) {
@@ -454,6 +455,7 @@ async function estimatePrice() {
   document.getElementById('price-box').style.display = 'flex';
   if (r.code === 200) {
     const d = r.data;
+    lastEstimatedPrice = d.price; // 缓存预估价格，下单时使用
     const surgeText = d.surgeFactor > 1 ? `（高峰 ${d.surgeFactor}x）` : '';
     document.getElementById('est-price').textContent = `¥ ${d.price}${surgeText}`;
     document.getElementById('est-detail').innerHTML =
@@ -476,7 +478,7 @@ async function doCreateOrder() {
   const body = {
     originLat: 39.99, originLng: 116.48, originAddr,
     destLat: 40.08,   destLng: 116.60,   destAddr,
-    estimatedPrice: 75.00,
+    estimatedPrice: lastEstimatedPrice ?? 75.00, // 优先使用预估接口返回值，未查询时 fallback
     city: 'default'
   };
 
@@ -488,7 +490,7 @@ async function doCreateOrder() {
   // 填充等待页信息
   document.getElementById('w-origin').textContent = originAddr;
   document.getElementById('w-dest').textContent   = destAddr;
-  document.getElementById('w-price').textContent  = `¥${r.data.estimatedPrice || 75}`;
+  document.getElementById('w-price').textContent  = `¥${r.data.estimatedPrice}`;
 
   // 查询附近司机数
   api('/dispatch/nearby?lat=39.99&lng=116.48&radius=5&city=default').then(nr => {

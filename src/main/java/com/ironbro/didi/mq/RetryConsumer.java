@@ -7,6 +7,7 @@ import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.entity.OrderDispatchLog;
 import com.ironbro.didi.enums.DispatchAction;
 import com.ironbro.didi.enums.OrderStatus;
+import com.ironbro.didi.service.DriverLocationService;
 import com.ironbro.didi.mapper.DriverMapper;
 import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
@@ -66,6 +67,16 @@ public class RetryConsumer {
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
+    private final DriverLocationService locationService;
+
+    /** 无司机时最大等待时间（秒），超过后才真正取消订单 */
+    private static final int MAX_NO_DRIVER_WAIT_SECONDS = 60;
+
+    /** GEO 召回半径（与 DispatchConsumer 保持一致） */
+    private static final double DISPATCH_RADIUS_KM = 5.0;
+
+    /** 最多召回候选司机数量（与 DispatchConsumer 保持一致） */
+    private static final int MAX_CANDIDATES = 10;
 
     /**
      * 消费超时重试消息
@@ -106,7 +117,7 @@ public class RetryConsumer {
                 channel.basicAck(deliveryTag, false);
                 return;
             }
-            doRetry(orderId, msgDispatchIndex);
+            doRetry(orderId, msgDispatchIndex, body);
             channel.basicAck(deliveryTag, false);
         } catch (Exception e) {
             log.error("重试处理失败 orderId={}", orderId, e);
@@ -121,10 +132,22 @@ public class RetryConsumer {
     /**
      * 核心重试逻辑
      *
+     * 两种消息类型：
+     * 1. noDriverRetry=true：无司机等待重试，重新 GEO 召回，超过 60s 才取消
+     * 2. 普通重试：候选司机未接单，轮换下一位候选司机
+     *
      * @param orderId          订单 ID
-     * @param msgDispatchIndex 消息中携带的派单索引（发送延迟消息时的快照值）
+     * @param msgDispatchIndex 消息中携带的派单索引（无司机重试时为 -1）
+     * @param body             完整消息体（用于读取 noDriverRetry、waitedSeconds 等字段）
      */
-    private void doRetry(Long orderId, int msgDispatchIndex) {
+    private void doRetry(Long orderId, int msgDispatchIndex, Map<String, Object> body) {
+        // 无司机等待重试分支：重新 GEO 召回，超过最大等待时间才取消
+        boolean noDriverRetry = Boolean.TRUE.equals(body.get("noDriverRetry"));
+        if (noDriverRetry) {
+            handleNoDriverRetry(orderId, body);
+            return;
+        }
+
         // 5.5.1 幂等校验：比较消息中的 dispatchIndex 与 Redis 当前索引
         String indexKey = "order:dispatch:index:" + orderId;
         String currentIndexStr = redisTemplate.opsForValue().get(indexKey);
@@ -203,6 +226,95 @@ public class RetryConsumer {
         sendDelayMessage(orderId, nextIndex);
 
         log.info("重试派单成功 orderId={} nextDriverId={} index={}", orderId, nextDriverId, nextIndex);
+    }
+
+    /**
+     * 无司机等待重试处理
+     *
+     * 每 15s 重新 GEO 召回一次，累计等待超过 MAX_NO_DRIVER_WAIT_SECONDS（60s）才取消订单。
+     * 若召回到司机，立即走正常派单流程（存候选列表、推送、发普通延迟消息）。
+     *
+     * @param orderId 订单 ID
+     * @param body    消息体，含 waitedSeconds、originLat、originLng、city 等字段
+     */
+    private void handleNoDriverRetry(Long orderId, Map<String, Object> body) {
+        // 订单状态校验，防止订单已被取消或接单
+        Order order = orderMapper.selectById(orderId);
+        if (order == null || order.getStatus() != OrderStatus.DISPATCHING) {
+            log.info("无司机重试：订单不在派单中状态，忽略 orderId={}", orderId);
+            return;
+        }
+
+        int waitedSeconds = body.containsKey("waitedSeconds")
+                ? ((Number) body.get("waitedSeconds")).intValue() : 0;
+
+        // 超过最大等待时间，取消订单
+        if (waitedSeconds >= MAX_NO_DRIVER_WAIT_SECONDS) {
+            log.info("无司机等待超时，取消订单 orderId={} waitedSeconds={}", orderId, waitedSeconds);
+            sendCancelMessage(orderId, "附近暂无可用司机");
+            return;
+        }
+
+        // 重新 GEO 召回，坐标从订单实体读取（无需消息体携带）
+        double originLat = order.getOriginLat().doubleValue();
+        double originLng = order.getOriginLng().doubleValue();
+        String city = "default";
+
+        List<Long> nearbyDriverIds = locationService.nearbyDrivers(
+                originLat, originLng, DISPATCH_RADIUS_KM, city, MAX_CANDIDATES);
+
+        int nextWaited = waitedSeconds + 15;
+
+        if (nearbyDriverIds.isEmpty()) {
+            // 仍无司机，继续等待
+            log.info("无司机重试：仍无司机，继续等待 orderId={} waitedSeconds={}", orderId, nextWaited);
+            sendNoDriverDelayMessage(orderId, nextWaited);
+            return;
+        }
+
+        // 有司机了，走正常派单流程：存候选列表、推送第一位、发普通延迟消息
+        log.info("无司机重试：发现司机，开始正常派单 orderId={} waitedSeconds={}", orderId, nextWaited);
+
+        String candidatesKey = "order:candidates:" + orderId;
+        String indexKey = "order:dispatch:index:" + orderId;
+
+        String candidatesJson;
+        try {
+            candidatesJson = objectMapper.writeValueAsString(nearbyDriverIds);
+        } catch (Exception e) {
+            log.error("候选列表序列化失败 orderId={}", orderId, e);
+            sendCancelMessage(orderId, "派单异常");
+            return;
+        }
+
+        redisTemplate.opsForValue().set(candidatesKey, candidatesJson, Duration.ofMinutes(10));
+        redisTemplate.opsForValue().set(indexKey, "0", Duration.ofMinutes(10));
+
+        Long targetDriverId = nearbyDriverIds.get(0);
+        pushOrderToDriver(orderId, targetDriverId);
+        updateDriverDispatchStats(targetDriverId);
+        saveDispatchLog(orderId, targetDriverId, DispatchAction.DISPATCHED,
+                "无司机等待后找到司机，开始派单 waitedSeconds=" + nextWaited);
+        sendDelayMessage(orderId, 0);
+    }
+
+    /**
+     * 发送无司机等待延迟消息
+     *
+     * 复用 dispatch.delay.queue（TTL=15s），携带 noDriverRetry=true 标记，
+     * 15s 后由 RetryConsumer 重新 GEO 召回。
+     */
+    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
+        msg.put("dispatchIndex", -1);   // 无司机重试不使用 dispatchIndex，填 -1 占位
+        msg.put("noDriverRetry", true);
+        msg.put("waitedSeconds", waitedSeconds);
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DELAY_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_DELAY,
+                msg
+        );
     }
 
     /** 推送新订单通知给司机（写 Redis，司机端轮询）
