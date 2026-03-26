@@ -55,6 +55,16 @@
   .status-text { font-size: 16px; color: #666; }
   .status-text.online { color: #4caf50; font-weight: bold; }
 
+  /* 路线选择弹窗 */
+  .route-select-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 200; align-items: flex-end; max-width: 390px; margin: 0 auto; }
+  .route-select-overlay.show { display: flex; }
+  .route-select-panel { background: #fff; border-radius: 20px 20px 0 0; padding: 24px; width: 100%; }
+  .route-select-title { font-size: 16px; font-weight: bold; color: #333; margin-bottom: 16px; }
+  .route-option { padding: 14px 16px; border: 2px solid #eee; border-radius: 10px; margin-bottom: 10px; cursor: pointer; }
+  .route-option.selected { border-color: #ff6b00; background: #fff8f0; }
+  .route-option-name { font-size: 15px; font-weight: bold; color: #333; }
+  .route-option-desc { font-size: 12px; color: #999; margin-top: 4px; }
+
   /* 新订单弹窗 */
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: flex-end; max-width: 390px; margin: 0 auto; }
   .modal-overlay.show { display: flex; }
@@ -178,6 +188,28 @@
       <div class="status-text" id="statusText">当前离线，请上线开始接单</div>
     </div>
     <button class="btn btn-secondary" style="margin-top:12px" onclick="showIncomeScreen()">查看收入统计</button>
+    <button class="btn btn-secondary" style="margin-top:8px" id="selectRouteBtn" onclick="openRouteSelect()">选择出发位置</button>
+    <div id="selectedRouteLabel" style="text-align:center;font-size:13px;color:#ff6b00;margin-top:8px;display:none"></div>
+  </div>
+</div>
+
+<!-- 路线选择弹窗 -->
+<div id="routeSelectOverlay" class="route-select-overlay">
+  <div class="route-select-panel">
+    <div class="route-select-title">选择您的出发位置</div>
+    <div class="route-option" id="routeOpt_A" onclick="selectRoute('A')">
+      <div class="route-option-name">路线 A：国贸出发</div>
+      <div class="route-option-desc">国贸 → 接客：三里屯 → 目的地：望京</div>
+    </div>
+    <div class="route-option" id="routeOpt_B" onclick="selectRoute('B')">
+      <div class="route-option-name">路线 B：中关村出发</div>
+      <div class="route-option-desc">中关村 → 接客：北京大学南门 → 目的地：颐和园</div>
+    </div>
+    <div class="route-option" id="routeOpt_C" onclick="selectRoute('C')">
+      <div class="route-option-name">路线 C：天安门出发</div>
+      <div class="route-option-desc">天安门 → 接客：王府井 → 目的地：朝阳公园</div>
+    </div>
+    <button class="btn btn-secondary" style="margin-top:8px" onclick="closeRouteSelect()">取消</button>
   </div>
 </div>
 
@@ -263,7 +295,8 @@
     </div>
   </div>
   <div class="trip-action">
-    <button class="btn btn-primary" id="tripActionBtn" onclick="tripAction()">已到达接客点</button>
+    <p id="tripStatusText" style="text-align:center;color:#ff6b00;font-weight:bold;margin:0"></p>
+    <button class="btn btn-primary" id="tripActionBtn" onclick="tripAction()" style="display:none">乘客已上车，开始行程</button>
   </div>
 </div>
 
@@ -289,6 +322,126 @@
 
 <script>
 // ----------------------------------------------------------------
+// 预设路线数据
+// 每条路线分两段：toPickup（司机起点→乘客上车点）、toDestination（上车点→目的地）
+// 坐标间距约 300-500m，5s 一个点，模拟真实行驶速度
+// ----------------------------------------------------------------
+const ROUTES = {
+  A: {
+    label: '路线A：国贸 → 三里屯 → 望京',
+    // 司机起点：国贸附近，逐步前往三里屯（乘客上车点）
+    // 坐标已加密，相邻点距离均 ≤ 450m，不触发漂移过滤（阈值 500m/5s）
+    toPickup: [
+      { lat: 39.9087, lng: 116.4633 }, // 国贸桥
+      { lat: 39.9100, lng: 116.4607 },
+      { lat: 39.9112, lng: 116.4580 }, // 光华路
+      { lat: 39.9128, lng: 116.4550 },
+      { lat: 39.9145, lng: 116.4521 }, // 工体东路
+      { lat: 39.9162, lng: 116.4494 },
+      { lat: 39.9178, lng: 116.4468 }, // 工体北路
+      { lat: 39.9194, lng: 116.4449 },
+      { lat: 39.9210, lng: 116.4430 }, // 三里屯路口
+      { lat: 39.9238, lng: 116.4412 }, // 三里屯太古里附近
+      { lat: 39.9255, lng: 116.4400 }, // 三里屯北街
+      { lat: 39.9268, lng: 116.4392 }, // 三里屯（乘客上车点）
+    ],
+    // 从三里屯前往望京（目的地）
+    toDestination: [
+      { lat: 39.9268, lng: 116.4392 }, // 三里屯出发
+      { lat: 39.9289, lng: 116.4421 },
+      { lat: 39.9310, lng: 116.4450 }, // 东直门外
+      { lat: 39.9333, lng: 116.4477 },
+      { lat: 39.9357, lng: 116.4503 },
+      { lat: 39.9380, lng: 116.4530 }, // 麦子店
+      { lat: 39.9403, lng: 116.4560 },
+      { lat: 39.9427, lng: 116.4590 },
+      { lat: 39.9450, lng: 116.4620 }, // 燕莎桥
+      { lat: 39.9477, lng: 116.4650 },
+      { lat: 39.9503, lng: 116.4680 },
+      { lat: 39.9530, lng: 116.4710 }, // 望京南
+      { lat: 39.9553, lng: 116.4733 },
+      { lat: 39.9577, lng: 116.4757 },
+      { lat: 39.9600, lng: 116.4780 }, // 望京西
+      { lat: 39.9630, lng: 116.4805 },
+      { lat: 39.9660, lng: 116.4830 }, // 望京中
+      { lat: 39.9685, lng: 116.4850 },
+      { lat: 39.9710, lng: 116.4870 }, // 望京东
+      { lat: 39.9730, lng: 116.4885 },
+      { lat: 39.9750, lng: 116.4900 }, // 望京花园
+      { lat: 39.9780, lng: 116.4920 }, // 望京（目的地）
+    ]
+  },
+  B: {
+    label: '路线B：中关村 → 北京大学南门 → 颐和园',
+    // 司机起点：中关村，前往北京大学南门（乘客上车点）
+    // 坐标已加密，相邻点距离均 ≤ 450m，不触发漂移过滤（阈值 500m/5s）
+    toPickup: [
+      { lat: 39.9826, lng: 116.3105 }, // 中关村广场
+      { lat: 39.9840, lng: 116.3060 }, // 中关村北大街
+      { lat: 39.9855, lng: 116.3020 }, // 海淀桥
+      { lat: 39.9870, lng: 116.2985 }, // 成府路
+      { lat: 39.9885, lng: 116.2960 }, // 北大东门
+      { lat: 39.9895, lng: 116.2940 }, // 北大南路
+      { lat: 39.9900, lng: 116.2925 }, // 北大南门附近
+      { lat: 39.9905, lng: 116.2912 }, // 北京大学南门（乘客上车点）
+    ],
+    // 从北大南门前往颐和园（目的地）
+    toDestination: [
+      { lat: 39.9905, lng: 116.2912 }, // 北大南门出发
+      { lat: 39.9898, lng: 116.2881 },
+      { lat: 39.9890, lng: 116.2850 }, // 颐和园路
+      { lat: 39.9880, lng: 116.2820 },
+      { lat: 39.9870, lng: 116.2790 }, // 蔚秀园
+      { lat: 39.9857, lng: 116.2760 },
+      { lat: 39.9845, lng: 116.2730 }, // 圆明园西路
+      { lat: 39.9832, lng: 116.2705 },
+      { lat: 39.9820, lng: 116.2680 }, // 颐和园东路
+      { lat: 39.9800, lng: 116.2640 }, // 颐和园南门路
+      { lat: 39.9785, lng: 116.2610 }, // 颐和园东宫门
+      { lat: 39.9775, lng: 116.2590 }, // 颐和园北宫门路
+      { lat: 39.9768, lng: 116.2575 }, // 颐和园入口
+      { lat: 39.9762, lng: 116.2563 }, // 颐和园（目的地）
+    ]
+  },
+  C: {
+    label: '路线C：天安门 → 王府井 → 朝阳公园',
+    // 司机起点：天安门附近，前往王府井（乘客上车点）
+    // 坐标已加密，相邻点距离均 ≤ 450m，不触发漂移过滤（阈值 500m/5s）
+    toPickup: [
+      { lat: 39.9055, lng: 116.3976 }, // 天安门广场
+      { lat: 39.9070, lng: 116.4020 }, // 东长安街
+      { lat: 39.9077, lng: 116.4050 },
+      { lat: 39.9085, lng: 116.4080 }, // 东单路口
+      { lat: 39.9093, lng: 116.4105 },
+      { lat: 39.9100, lng: 116.4130 }, // 东单北大街
+      { lat: 39.9115, lng: 116.4160 }, // 王府井南口
+      { lat: 39.9130, lng: 116.4175 }, // 王府井大街
+      { lat: 39.9145, lng: 116.4182 }, // 王府井中段
+      { lat: 39.9158, lng: 116.4188 }, // 王府井（乘客上车点）
+    ],
+    // 从王府井前往朝阳公园（目的地）
+    toDestination: [
+      { lat: 39.9158, lng: 116.4188 }, // 王府井出发
+      { lat: 39.9169, lng: 116.4234 },
+      { lat: 39.9180, lng: 116.4280 }, // 东四十条
+      { lat: 39.9195, lng: 116.4320 },
+      { lat: 39.9210, lng: 116.4360 }, // 朝阳门外
+      { lat: 39.9225, lng: 116.4395 },
+      { lat: 39.9240, lng: 116.4430 }, // 工体北路
+      { lat: 39.9255, lng: 116.4470 },
+      { lat: 39.9270, lng: 116.4510 }, // 农展馆
+      { lat: 39.9285, lng: 116.4545 },
+      { lat: 39.9300, lng: 116.4580 }, // 朝阳公园西门路
+      { lat: 39.9310, lng: 116.4605 },
+      { lat: 39.9320, lng: 116.4630 }, // 朝阳公园南门
+      { lat: 39.9335, lng: 116.4660 }, // 朝阳公园西路
+      { lat: 39.9345, lng: 116.4680 }, // 朝阳公园入口
+      { lat: 39.9352, lng: 116.4692 }, // 朝阳公园（目的地）
+    ]
+  }
+};
+
+// ----------------------------------------------------------------
 // 状态管理
 // ----------------------------------------------------------------
 let state = {
@@ -300,7 +453,12 @@ let state = {
   tripStatus: null,      // ACCEPTED / PICKING / IN_TRIP
   pollTimer: null,
   countdownTimer: null,
-  locationTimer: null
+  locationTimer: null,
+  // 路线模拟相关
+  routeKey: null,        // 当前选择的路线 key：'A' | 'B' | 'C'
+  routeIndex: 0,         // 当前路线段的坐标索引
+  routeSegment: null,    // 当前行进段：'toPickup' | 'toDestination' | null（等单时停在起点）
+  routeArrived: false,   // 当前段是否已走完（等待司机手动确认）
 };
 
 // ----------------------------------------------------------------
@@ -361,6 +519,14 @@ function renderHomeHeader() {
 // ----------------------------------------------------------------
 async function toggleOnline() {
   const online = document.getElementById('onlineSwitch').checked;
+
+  // 上线前必须选择路线
+  if (online && !state.routeKey) {
+    document.getElementById('onlineSwitch').checked = false;
+    alert('请先选择出发位置，再上线接单');
+    return;
+  }
+
   const res = await api('/driver/status', 'PUT', { online });
   if (!res.ok) {
     // 切换失败，回滚开关状态
@@ -458,6 +624,10 @@ async function acceptOrder() {
 
   stopPollPendingOrder();
   state.tripStatus = 'ACCEPTED';
+  // 接单后开始沿接客段路线移动
+  state.routeSegment = 'toPickup';
+  state.routeIndex = 0;
+  state.routeArrived = false;
   renderTripScreen(res.data);
   showScreen('trip');
 }
@@ -473,17 +643,36 @@ function renderTripScreen(order) {
 
 function updateTripStep(status) {
   const steps = {
-    ACCEPTED: { title: '前往接客点',   subtitle: '请尽快前往乘客位置',    btn: '已到达接客点',        step: 1 },
-    PICKING:  { title: '等待乘客上车', subtitle: '已到达接客点，等待乘客', btn: '乘客已上车，开始行程', step: 2 },
-    IN_TRIP:  { title: '行程中',       subtitle: '正在前往目的地',         btn: '到达目的地，结束行程', step: 3 }
+    ACCEPTED: { title: '前往接客点',   subtitle: '请尽快前往乘客位置',    step: 1 },
+    PICKING:  { title: '等待乘客上车', subtitle: '已到达接客点，等待乘客', step: 2 },
+    IN_TRIP:  { title: '行程中',       subtitle: '正在前往目的地',         step: 3 }
   };
   const s = steps[status];
   if (!s) return;
-  document.getElementById('tripTitle').textContent     = s.title;
-  document.getElementById('tripSubtitle').textContent  = s.subtitle;
-  document.getElementById('tripActionBtn').textContent = s.btn;
+  document.getElementById('tripTitle').textContent    = s.title;
+  document.getElementById('tripSubtitle').textContent = s.subtitle;
 
-  // 更新步骤点样式：已完成=绿色✓，当前=橙色，未到=灰色
+  const btn      = document.getElementById('tripActionBtn');
+  const statusTx = document.getElementById('tripStatusText');
+
+  if (status === 'ACCEPTED') {
+    // 前往接客点：显示状态文本，隐藏按钮
+    statusTx.textContent = '正在前往接客点...';
+    statusTx.style.display = '';
+    btn.style.display = 'none';
+  } else if (status === 'PICKING') {
+    // 已到达接客点：显示"乘客已上车"按钮
+    statusTx.style.display = 'none';
+    btn.textContent = '乘客已上车，开始行程';
+    btn.style.display = '';
+  } else if (status === 'IN_TRIP') {
+    // 前往目的地：显示状态文本，隐藏按钮
+    statusTx.textContent = '正在前往目的地...';
+    statusTx.style.display = '';
+    btn.style.display = 'none';
+  }
+
+  // 更新步骤点样式
   for (let i = 1; i <= 4; i++) {
     const dot = document.getElementById('step' + i + 'dot');
     if (i <= s.step)           { dot.className = 'step-dot done';    dot.textContent = '✓'; }
@@ -494,22 +683,31 @@ function updateTripStep(status) {
 
 async function tripAction() {
   if (!state.currentOrderId) return;
-  let endpoint;
-  let nextStatus;
-  if      (state.tripStatus === 'ACCEPTED') { endpoint = '/order/' + state.currentOrderId + '/arrive'; nextStatus = 'PICKING'; }
-  else if (state.tripStatus === 'PICKING')  { endpoint = '/order/' + state.currentOrderId + '/start';  nextStatus = 'IN_TRIP'; }
-  else if (state.tripStatus === 'IN_TRIP')  { endpoint = '/order/' + state.currentOrderId + '/finish'; nextStatus = 'FINISHED'; }
-  else return;
 
-  const res = await api(endpoint, 'POST');
-  if (!res.ok) { alert(res.msg || '操作失败'); return; }
+  if (state.tripStatus === 'PICKING') {
+    // "乘客已上车，开始行程"：顺序调用 /arrive（ACCEPTED→PICKING）再 /start（PICKING→IN_TRIP）
+    // 后端 /start 要求当前状态为 PICKING，所以必须先调 /arrive
+    const r1 = await api('/order/' + state.currentOrderId + '/arrive', 'POST');
+    if (!r1.ok) { alert(r1.msg || '操作失败'); return; }
+    const r2 = await api('/order/' + state.currentOrderId + '/start', 'POST');
+    if (!r2.ok) { alert(r2.msg || '操作失败'); return; }
+    state.tripStatus = 'IN_TRIP';
+    state.routeSegment = 'toDestination';
+    state.routeIndex = 0;
+    state.routeArrived = false;
+    updateTripStep('IN_TRIP');
 
-  if (nextStatus === 'FINISHED') {
+  } else if (state.tripStatus === 'IN_TRIP') {
+    // "到达目的地，结束行程"
+    const res = await api('/order/' + state.currentOrderId + '/finish', 'POST');
+    if (!res.ok) { alert(res.msg || '操作失败'); return; }
     const price = res.data.actualPrice || res.data.estimatedPrice;
     alert('行程结束！实际费用：¥' + price);
     state.currentOrderId = null;
     state.tripStatus = null;
-    // 行程结束后恢复在线状态，重新开始轮询
+    state.routeSegment = null;
+    state.routeIndex = 0;
+    state.routeArrived = false;
     state.isOnline = true;
     document.getElementById('onlineSwitch').checked = true;
     document.getElementById('onlineLabel').textContent = '在线';
@@ -518,24 +716,95 @@ async function tripAction() {
     document.getElementById('statusText').className = 'status-text online';
     startPollPendingOrder();
     showScreen('home');
-  } else {
-    state.tripStatus = nextStatus;
-    updateTripStep(nextStatus);
   }
 }
 
 // ----------------------------------------------------------------
-// 位置上报（每 5s 上报一次 mock 坐标，仅在线时上报）
+// 位置上报（每 5s 上报一次，仅在线时上报）
+//
+// 行为说明：
+// - 等单中（routeSegment=null）：停在路线起点不动，只做心跳
+// - 接客段（routeSegment='toPickup'）：逐点前进，走完后提醒司机已到达接客点
+// - 行程段（routeSegment='toDestination'）：逐点前进，走完后提醒司机已到达目的地
+// - routeArrived=true 时停止推进，等待司机手动点按钮
 // ----------------------------------------------------------------
 function startLocationReport() {
   if (state.locationTimer) return;
   state.locationTimer = setInterval(() => {
-    if (!state.isOnline) return;
-    // mock 坐标：北京附近随机偏移，模拟司机移动
-    const lat = 39.9 + (Math.random() - 0.5) * 0.01;
-    const lng = 116.4 + (Math.random() - 0.5) * 0.01;
-    api('/driver/location', 'POST', { lat, lng, timestamp: Date.now(), city: 'default' });
+    if (!state.isOnline || !state.routeKey) return;
+
+    const route = ROUTES[state.routeKey];
+    let pos;
+
+    if (!state.routeSegment) {
+      // 等单中：停在接客段起点（即司机出发位置）
+      pos = route.toPickup[0];
+    } else {
+      const segment = route[state.routeSegment];
+
+      if (state.routeArrived) {
+        // 已到达终点，停在最后一个坐标不动
+        pos = segment[segment.length - 1];
+      } else {
+        pos = segment[state.routeIndex];
+        state.routeIndex++;
+
+        if (state.routeIndex >= segment.length) {
+          // 当前段走完，停止推进，切换 UI
+          state.routeArrived = true;
+          const btn      = document.getElementById('tripActionBtn');
+          const statusTx = document.getElementById('tripStatusText');
+          if (state.routeSegment === 'toPickup') {
+            // 到达接客点：隐藏文本，显示"乘客已上车"按钮，tripStatus 切为 PICKING
+            state.tripStatus = 'PICKING';
+            statusTx.style.display = 'none';
+            btn.textContent = '乘客已上车，开始行程';
+            btn.style.display = '';
+            updateTripStep('PICKING');
+            alert('已到达接客点，请等待乘客上车');
+          } else {
+            // 到达目的地：隐藏文本，显示"结束行程"按钮
+            statusTx.style.display = 'none';
+            btn.textContent = '到达目的地，结束行程';
+            btn.style.display = '';
+            alert('已到达目的地，请点击结束行程');
+          }
+        }
+      }
+    }
+
+    api('/driver/location', 'POST', { lat: pos.lat, lng: pos.lng, timestamp: Date.now(), city: 'default' });
   }, 5000);
+}
+
+// ----------------------------------------------------------------
+// 路线选择
+// ----------------------------------------------------------------
+function openRouteSelect() {
+  // 高亮当前已选路线
+  ['A', 'B', 'C'].forEach(k => {
+    document.getElementById('routeOpt_' + k).classList.toggle('selected', state.routeKey === k);
+  });
+  document.getElementById('routeSelectOverlay').classList.add('show');
+}
+
+function closeRouteSelect() {
+  document.getElementById('routeSelectOverlay').classList.remove('show');
+}
+
+function selectRoute(key) {
+  state.routeKey = key;
+  state.routeIndex = 0;
+  state.routeSegment = null;
+  state.routeArrived = false;
+
+  const label = ROUTES[key].label;
+  const labelEl = document.getElementById('selectedRouteLabel');
+  labelEl.textContent = '当前：' + label;
+  labelEl.style.display = 'block';
+  document.getElementById('selectRouteBtn').textContent = '更换出发位置';
+
+  closeRouteSelect();
 }
 
 // ----------------------------------------------------------------
@@ -598,7 +867,8 @@ function doLogout() {
   if (state.locationTimer) { clearInterval(state.locationTimer); }
   state = { userId: null, driverId: null, driverInfo: null, isOnline: false,
             currentOrderId: null, tripStatus: null, pollTimer: null,
-            countdownTimer: null, locationTimer: null };
+            countdownTimer: null, locationTimer: null,
+            routeKey: null, routeIndex: 0, routeSegment: null, routeArrived: false };
   showScreen('login');
 }
 

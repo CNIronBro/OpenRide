@@ -101,7 +101,8 @@ public class DriverLocationService {
             double lastLng = Double.parseDouble(parts[1]);
             double distMeters = haversineMeters(lastLat, lastLng, lat, lng);
             if (distMeters > MAX_DISTANCE_PER_INTERVAL_METERS) {
-                log.warn("位置漂移，丢弃 driverId={} dist={}m", driverId, (int) distMeters);
+                log.warn("位置漂移，丢弃 driverId={} dist={}m，lastLat={}, lastLng={}",
+                        driverId, (int) distMeters, lastLat, lastLng);
                 return false;
             }
         }

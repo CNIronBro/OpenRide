@@ -42,6 +42,7 @@
   .loc-dot.start { background: #4caf50; }
   .loc-dot.end { background: #ff6b00; }
   .loc-row input { border: none; outline: none; flex: 1; font-size: 15px; }
+  .loc-row select { border: none; outline: none; flex: 1; font-size: 15px; background: transparent; cursor: pointer; }
   .price-estimate { background: #fff8f0; border: 1px solid #ffe0b2; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
   .price-estimate .price { font-size: 22px; font-weight: bold; color: #ff6b00; }
   .price-estimate .detail { font-size: 12px; color: #999; text-align: right; }
@@ -184,11 +185,16 @@
     <div class="location-input">
       <div class="loc-row">
         <div class="loc-dot start"></div>
-        <input type="text" id="origin-addr" value="北京市朝阳区望京街道" placeholder="起点">
+        <select id="route-select" onchange="onRouteSelect()">
+          <option value="">-- 请选择路线 --</option>
+          <option value="A">路线A：三里屯 → 望京</option>
+          <option value="B">路线B：北京大学南门 → 颐和园</option>
+          <option value="C">路线C：王府井 → 朝阳公园</option>
+        </select>
       </div>
       <div class="loc-row">
         <div class="loc-dot end"></div>
-        <input type="text" id="dest-addr" placeholder="请输入目的地" value="北京首都国际机场 T3">
+        <span id="dest-display" style="flex:1;font-size:15px;color:#999">目的地将自动填入</span>
       </div>
     </div>
     <div class="price-estimate" id="price-box" style="display:none">
@@ -390,12 +396,60 @@
 
 <script>
 const API = '';
+
+// ----------------------------------------------------------------
+// 预设路线数据（与司机端保持一致）
+// 乘客端只需要上车点和目的地坐标
+// ----------------------------------------------------------------
+const PASSENGER_ROUTES = {
+  A: {
+    originAddr: '三里屯',
+    originLat: 39.9268, originLng: 116.4392,
+    destAddr: '望京',
+    destLat: 39.9780, destLng: 116.4920
+  },
+  B: {
+    originAddr: '北京大学南门',
+    originLat: 39.9905, originLng: 116.2912,
+    destAddr: '颐和园',
+    destLat: 39.9762, destLng: 116.2563
+  },
+  C: {
+    originAddr: '王府井',
+    originLat: 39.9158, originLng: 116.4188,
+    destAddr: '朝阳公园',
+    destLat: 39.9352, destLng: 116.4692
+  }
+};
+
 let currentUserId = null;
-let currentOrderId = null;   // 当前进行中的订单 ID
-let pollTimer = null;        // 订单状态轮询定时器
-let currentOrder = null;     // 当前订单完整数据（支付页使用）
-let reviewStar = 5;          // 评价星级，默认 5 星
-let lastEstimatedPrice = null; // 最近一次预估价格（由 queryEstimate 写入，下单时使用）
+let currentOrderId = null;
+let pollTimer = null;
+let currentOrder = null;
+let reviewStar = 5;
+let lastEstimatedPrice = null;
+let selectedRoute = null; // 当前选中的路线数据
+
+// ----------------------------------------------------------------
+// 路线选择回调
+// ----------------------------------------------------------------
+function onRouteSelect() {
+  const key = document.getElementById('route-select').value;
+  if (!key) {
+    selectedRoute = null;
+    document.getElementById('dest-display').textContent = '目的地将自动填入';
+    document.getElementById('dest-display').style.color = '#999';
+    document.getElementById('price-box').style.display = 'none';
+    lastEstimatedPrice = null;
+    return;
+  }
+  selectedRoute = PASSENGER_ROUTES[key];
+  document.getElementById('dest-display').textContent = selectedRoute.destAddr;
+  document.getElementById('dest-display').style.color = '#333';
+  // 切换路线时清空上次预估价
+  document.getElementById('price-box').style.display = 'none';
+  lastEstimatedPrice = null;
+}
 
 // ---- 通用请求 ----
 async function api(path, opts = {}) {
@@ -434,9 +488,12 @@ async function doLogin() {
   }
 }
 
-// ---- 附近司机数量（mock 坐标：望京） ----
+// ---- 附近司机数量 ----
 async function loadNearbyCount() {
-  const r = await api('/dispatch/nearby?lat=39.99&lng=116.48&radius=5&city=default');
+  // 使用路线A起点作为默认查询坐标（乘客上车点）
+  const lat = selectedRoute ? selectedRoute.originLat : 39.9268;
+  const lng = selectedRoute ? selectedRoute.originLng : 116.4392;
+  const r = await api(`/dispatch/nearby?lat=${lat}&lng=${lng}&radius=5&city=default`);
   const el = document.getElementById('nearby-count');
   if (r.code === 200) {
     el.textContent = `附近 ${r.data.length} 位司机`;
@@ -445,40 +502,36 @@ async function loadNearbyCount() {
   }
 }
 
-// ---- 预估价格（调用真实 GET /order/estimate 接口） ----
+// ---- 预估价格 ----
 async function estimatePrice() {
-  const dest = document.getElementById('dest-addr').value.trim();
-  if (!dest) { alert('请输入目的地'); return; }
+  if (!selectedRoute) { alert('请先选择路线'); return; }
 
-  // mock 坐标：望京 → 首都机场
-  const r = await api('/order/estimate?originLat=39.99&originLng=116.48&destLat=40.08&destLng=116.60&region=default');
+  const { originLat, originLng, destLat, destLng } = selectedRoute;
+  const r = await api(`/order/estimate?originLat=${originLat}&originLng=${originLng}&destLat=${destLat}&destLng=${destLng}&region=default`);
   document.getElementById('price-box').style.display = 'flex';
   if (r.code === 200) {
     const d = r.data;
-    lastEstimatedPrice = d.price; // 缓存预估价格，下单时使用
+    lastEstimatedPrice = d.price;
     const surgeText = d.surgeFactor > 1 ? `（高峰 ${d.surgeFactor}x）` : '';
     document.getElementById('est-price').textContent = `¥ ${d.price}${surgeText}`;
     document.getElementById('est-detail').innerHTML =
         `<div>起步价 ¥${d.basePrice}</div><div>¥${d.perKm}/km · ¥${d.perMin}/min</div>`;
   } else {
-    // 接口失败时 fallback 到 mock 值
-    document.getElementById('est-price').textContent = '¥ 68 - 82';
-    document.getElementById('est-detail').innerHTML = '<div>约 28km</div><div>约 45分钟</div>';
+    document.getElementById('est-price').textContent = '¥ —';
+    document.getElementById('est-detail').innerHTML = '<div>预估失败</div>';
   }
 }
 
 // ---- 下单 ----
 async function doCreateOrder() {
   if (!currentUserId) { alert('请先登录'); return; }
-  const originAddr = document.getElementById('origin-addr').value.trim();
-  const destAddr   = document.getElementById('dest-addr').value.trim();
-  if (!destAddr) { alert('请输入目的地'); return; }
+  if (!selectedRoute) { alert('请先选择路线'); return; }
 
-  // mock 坐标（望京 → 首都机场）
+  const { originAddr, originLat, originLng, destAddr, destLat, destLng } = selectedRoute;
   const body = {
-    originLat: 39.99, originLng: 116.48, originAddr,
-    destLat: 40.08,   destLng: 116.60,   destAddr,
-    estimatedPrice: lastEstimatedPrice ?? 75.00, // 优先使用预估接口返回值，未查询时 fallback
+    originLat, originLng, originAddr,
+    destLat,   destLng,   destAddr,
+    estimatedPrice: lastEstimatedPrice ?? 30.00,
     city: 'default'
   };
 
@@ -487,13 +540,11 @@ async function doCreateOrder() {
 
   currentOrderId = r.data.id;
 
-  // 填充等待页信息
   document.getElementById('w-origin').textContent = originAddr;
   document.getElementById('w-dest').textContent   = destAddr;
   document.getElementById('w-price').textContent  = `¥${r.data.estimatedPrice}`;
 
-  // 查询附近司机数
-  api('/dispatch/nearby?lat=39.99&lng=116.48&radius=5&city=default').then(nr => {
+  api(`/dispatch/nearby?lat=${originLat}&lng=${originLng}&radius=5&city=default`).then(nr => {
     document.getElementById('w-nearby').textContent =
         nr.code === 200 ? `${nr.data.length} 位` : '-';
   });
@@ -671,9 +722,15 @@ async function loadHistory() {
   }).join('');
 }
 
-function rebook(origin, dest) {
-  document.getElementById('origin-addr').value = origin;
-  document.getElementById('dest-addr').value = dest;
+function rebook(originAddr, destAddr) {
+  // 根据地址反查路线 key，自动选中对应路线
+  const key = Object.keys(PASSENGER_ROUTES).find(k =>
+    PASSENGER_ROUTES[k].originAddr === originAddr && PASSENGER_ROUTES[k].destAddr === destAddr
+  );
+  if (key) {
+    document.getElementById('route-select').value = key;
+    onRouteSelect();
+  }
   showScreen('home');
 }
 
@@ -696,11 +753,18 @@ async function showPaymentScreen(order) {
   document.getElementById('bill-total').textContent = `¥ ${price}`;
 
   // 获取计价规则明细（用于账单拆分展示）
-  const r = await api('/order/estimate?originLat=39.99&originLng=116.48&destLat=40.08&destLng=116.60&region=default');
+  const lat1 = selectedRoute ? selectedRoute.originLat : 39.9268;
+  const lng1 = selectedRoute ? selectedRoute.originLng : 116.4392;
+  const lat2 = selectedRoute ? selectedRoute.destLat   : 39.9780;
+  const lng2 = selectedRoute ? selectedRoute.destLng   : 116.4920;
+  const r = await api(`/order/estimate?originLat=${lat1}&originLng=${lng1}&destLat=${lat2}&destLng=${lng2}&region=default`);
   if (r.code === 200) {
     const d = r.data;
-    // 估算里程和时长（与 finishTrip 中相同的 mock 坐标）
-    const distKm = 13.5; // 望京→首都机场直线约 13.5km
+    // 用 Haversine 公式估算直线距离（km）
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+    const distKm = +(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))).toFixed(1);
     const durMin = Math.round(distKm / 40 * 60);
     document.getElementById('bill-base').textContent = `¥ ${d.basePrice}`;
     document.getElementById('bill-km').textContent   = `¥ ${(d.perKm * distKm).toFixed(2)}（${distKm}km × ¥${d.perKm}）`;

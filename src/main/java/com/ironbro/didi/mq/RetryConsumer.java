@@ -138,6 +138,7 @@ public class RetryConsumer {
      * @param msgDispatchIndex 消息中携带的派单索引（无司机重试时为 -1）
      * @param body             完整消息体（用于读取 noDriverRetry、waitedSeconds 等字段）
      */
+    // QUESTION
     private void doRetry(Long orderId, int msgDispatchIndex, Map<String, Object> body) {
         // 无司机等待重试分支：重新 GEO 召回，超过最大等待时间才取消
         boolean noDriverRetry = Boolean.TRUE.equals(body.get("noDriverRetry"));
@@ -236,6 +237,7 @@ public class RetryConsumer {
      * @param orderId 订单 ID
      * @param body    消息体，含 waitedSeconds、originLat、originLng、city 等字段
      */
+    // QUESTION
     private void handleNoDriverRetry(Long orderId, Map<String, Object> body) {
         // 订单状态校验，防止订单已被取消或接单
         Order order = orderMapper.selectById(orderId);
@@ -288,7 +290,7 @@ public class RetryConsumer {
 
         // 候选司机列表
         redisTemplate.opsForValue().set(candidatesKey, candidatesJson, Duration.ofMinutes(10));
-        // 当前派到了第几个司机。
+        // 当前派到了第几个司机
         redisTemplate.opsForValue().set(indexKey, "0", Duration.ofMinutes(10));
 
         Long targetDriverId = nearbyDriverIds.get(0);
@@ -308,13 +310,14 @@ public class RetryConsumer {
      */
     // QUESTION
     private void pushOrderToDriver(Long orderId, Long driverId) {
-        // 7.3 重复推送防护：与 DispatchConsumer 共用同一 Redis Set
-        String dispatchedKey = "order:dispatched:drivers:" + orderId;
-        // 如果这个司机原来不在集合里，返回1；如果已在的话，返回0。
-        Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
-        redisTemplate.expire(dispatchedKey, Duration.ofMinutes(10));
+        // 7.3 重复推送防护：与 DispatchConsumer 共用同一 key 格式 order:dispatched:{orderId}:{driverId}
+        // 用 setIfAbsent（SET NX PX）原子写入+TTL，彻底避免 SADD+EXPIRE 两步操作。
+        // 规避 Spring Data Redis 3.5.x 中 redisTemplate.expire() 触发 pExpire 无限递归的 bug。
+        String dispatchedKey = "order:dispatched:" + orderId + ":" + driverId;
+        Boolean firstTime = redisTemplate.opsForValue()
+                .setIfAbsent(dispatchedKey, "1", Duration.ofMinutes(10));
 
-        if (added == null || added == 0) {
+        if (!Boolean.TRUE.equals(firstTime)) {
             log.info("司机已被推送过此订单（重试链路），跳过 driverId={} orderId={}", driverId, orderId);
             return;
         }

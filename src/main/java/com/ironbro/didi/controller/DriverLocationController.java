@@ -4,6 +4,7 @@ import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.common.Result;
 import com.ironbro.didi.common.SessionUtils;
 import com.ironbro.didi.service.DriverLocationService;
+import com.ironbro.didi.service.DriverService;
 import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -19,6 +20,7 @@ import java.util.Map;
 public class DriverLocationController {
 
     private final DriverLocationService locationService;
+    private final DriverService driverService;
 
     /**
      * 4.1 司机上报位置
@@ -28,8 +30,10 @@ public class DriverLocationController {
      */
     @PostMapping("/driver/location")
     public Result<Void> reportLocation(@RequestBody Map<String, Object> body, HttpSession session) {
-        Long driverId = SessionUtils.getUserId(session);
-        if (driverId == null) throw new BizException(401, "未登录");
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "未登录");
+        // GEO 中存储 driver.id（非 user_id），与派单查询保持一致
+        Long driverId = driverService.getDriverByUserId(userId).getId();
 
         double lat  = ((Number) body.get("lat")).doubleValue();
         double lng  = ((Number) body.get("lng")).doubleValue();

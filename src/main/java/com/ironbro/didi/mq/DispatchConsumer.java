@@ -258,6 +258,7 @@ public class DispatchConsumer {
      * 注意：Spring Data Redis 的 GeoOperations.distance() 只能计算 GEO 集合中两个成员之间的距离，
      * 无法直接计算成员与任意坐标的距离，因此改用 GEOPOS + Haversine 方式。
      */
+    // QUESTION
     private List<DispatchScoreService.CandidateDriver> buildCandidates(
             List<Driver> drivers, double originLat, double originLng, String city) {
 
@@ -298,13 +299,15 @@ public class DispatchConsumer {
      * @return true=推送成功，false=该司机已被推送过（跳过）
      */
     private boolean pushOrderToDriver(Long orderId, Long driverId) {
-        // 7.3 重复推送防护：SADD 返回 1 表示新增成功（未推送过），返回 0 表示已存在（已推送过）
-        // SADD 是原子操作，天然防止并发下的重复写入，无需额外加锁
-        String dispatchedKey = "order:dispatched:drivers:" + orderId;
-        Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
-        redisTemplate.expire(dispatchedKey, Duration.ofMinutes(10));
+        // 7.3 重复推送防护：用 setIfAbsent（SET NX PX）原子写入+TTL，彻底避免 SADD+EXPIRE 两步操作。
+        // 规避 Spring Data Redis 3.5.x 中 redisTemplate.expire() 最终调用
+        // DefaultedRedisConnection.pExpire() 无限递归导致 StackOverflowError 的 bug。
+        // key=order:dispatched:{orderId}:{driverId}，返回 true 表示首次写入（未推送过）
+        String dispatchedKey = "order:dispatched:" + orderId + ":" + driverId;
+        Boolean firstTime = redisTemplate.opsForValue()
+                .setIfAbsent(dispatchedKey, "1", Duration.ofMinutes(10));
 
-        if (added == null || added == 0) {
+        if (!Boolean.TRUE.equals(firstTime)) {
             // 该司机已被推送过此订单，跳过（防止重复弹窗）
             log.info("司机已被推送过此订单，跳过 driverId={} orderId={}", driverId, orderId);
             return false;
@@ -321,6 +324,7 @@ public class DispatchConsumer {
      * 更新司机派单统计信息
      * 更新 last_dispatch_at 和 dispatch_count_today，用于下次调度评分
      */
+    // QUESTION
     private void updateDriverDispatchStats(Long driverId) {
         Driver driver = driverMapper.selectById(driverId);
         if (driver != null) {
