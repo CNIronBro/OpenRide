@@ -39,9 +39,6 @@ import java.util.List;
 @RequiredArgsConstructor
 public class DriverLocationService {
 
-    /** 同一司机两次上报的最小间隔（秒） */
-    private static final int THROTTLE_SECONDS = 5;
-
     /**
      * 漂移过滤阈值：5s 内移动超过 500m 视为漂移
      * 500m / 5s ≈ 360km/h，超过此速度的位移认为是 GPS 漂移
@@ -69,20 +66,11 @@ public class DriverLocationService {
      * @return false 表示被过滤（频率/乱序/漂移），true 表示写入成功
      */
     public boolean reportLocation(Long driverId, double lat, double lng, long timestamp, String city) {
-        String throttleKey   = "driver:location:last:" + driverId;
         String heartbeatKey  = "driver:heartbeat:" + driverId;
         String lastPosKey    = "driver:location:pos:" + driverId;
         String geoKey        = "driver:online:" + city;
 
-        // 4.1 频率控制：5s 内只处理一次
-        // SET NX + TTL：若 key 已存在（上次上报在 5s 内），直接丢弃
-        Boolean allowed = redisTemplate.opsForValue()
-                .setIfAbsent(throttleKey, String.valueOf(timestamp), Duration.ofSeconds(THROTTLE_SECONDS));
-        if (!Boolean.TRUE.equals(allowed)) {
-            return false;
-        }
-
-        // 4.7 乱序过滤：时间戳早于上次处理时间，丢弃
+        // 乱序过滤：时间戳早于上次处理时间，丢弃
         String lastTsStr = redisTemplate.opsForValue().get("driver:location:ts:" + driverId);
         if (lastTsStr != null && timestamp <= Long.parseLong(lastTsStr)) {
             log.debug("位置乱序，丢弃 driverId={} ts={}", driverId, timestamp);
@@ -91,9 +79,7 @@ public class DriverLocationService {
         redisTemplate.opsForValue().set("driver:location:ts:" + driverId,
                 String.valueOf(timestamp), Duration.ofMinutes(5));
 
-        // 4.8 漂移过滤：与上次位置距离超过 500m/5s，丢弃
-        // TODO 当前容易出现锁死风险，假如后续的位置都与上次位置发生了漂移，那么位置一直不能被更新。
-        //  并且还要考虑到即使发生位置漂移，心跳ttl也要被刷新。
+        // 漂移过滤：与上次位置距离超过 500m/5s，丢弃
         String lastPos = redisTemplate.opsForValue().get(lastPosKey);
         if (lastPos != null) {
             String[] parts = lastPos.split(",");
@@ -101,8 +87,13 @@ public class DriverLocationService {
             double lastLng = Double.parseDouble(parts[1]);
             double distMeters = haversineMeters(lastLat, lastLng, lat, lng);
             if (distMeters > MAX_DISTANCE_PER_INTERVAL_METERS) {
-                log.warn("位置漂移，丢弃 driverId={} dist={}m，lastLat={}, lastLng={}",
-                        driverId, (int) distMeters, lastLat, lastLng);
+                log.warn("位置漂移，丢弃 driverId={} dist={}m，lastLat={}, lastLng={}, lat={}, lng={}",
+                        driverId, (int) distMeters, lastLat, lastLng, lat, lng);
+                // 漂移时仍更新参考坐标，避免后续所有点都与旧坐标比较导致永久锁死：
+                // 若不更新，下次上报的距离只会更大，司机位置将永远无法写入 Redis GEO
+                redisTemplate.opsForValue().set(lastPosKey, lat + "," + lng, Duration.ofMinutes(5));
+                // 漂移点虽不写 GEO，但仍刷新心跳，避免司机被误判为假在线
+                redisTemplate.opsForValue().set(heartbeatKey, "1", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
                 return false;
             }
         }
@@ -116,7 +107,7 @@ public class DriverLocationService {
 
         // 4.3 刷新心跳 TTL=30s
         redisTemplate.opsForValue().set(heartbeatKey, "1", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
-
+        log.info("位置上报，lat={}, lng={}", lat, lng);
         return true;
     }
 
@@ -166,7 +157,6 @@ public class DriverLocationService {
     public void removeFromOnline(Long driverId, String city) {
         redisTemplate.opsForGeo().remove("driver:online:" + city, String.valueOf(driverId));
         redisTemplate.delete("driver:heartbeat:" + driverId);
-        redisTemplate.delete("driver:location:last:" + driverId);
         redisTemplate.delete("driver:location:pos:" + driverId);
         redisTemplate.delete("driver:location:ts:" + driverId);
     }
