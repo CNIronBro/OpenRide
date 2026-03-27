@@ -310,14 +310,13 @@ public class RetryConsumer {
      */
     // QUESTION
     private void pushOrderToDriver(Long orderId, Long driverId) {
-        // 7.3 重复推送防护：与 DispatchConsumer 共用同一 key 格式 order:dispatched:{orderId}:{driverId}
-        // 用 setIfAbsent（SET NX PX）原子写入+TTL，彻底避免 SADD+EXPIRE 两步操作。
-        // 规避 Spring Data Redis 3.5.x 中 redisTemplate.expire() 触发 pExpire 无限递归的 bug。
-        String dispatchedKey = "order:dispatched:" + orderId + ":" + driverId;
-        Boolean firstTime = redisTemplate.opsForValue()
-                .setIfAbsent(dispatchedKey, "1", Duration.ofMinutes(10));
+        // 7.3 重复推送防护：与 DispatchConsumer 共用同一 Redis Set
+        String dispatchedKey = "order:dispatched:drivers:" + orderId;
+        // 如果这个司机原来不在集合里，返回1；如果已在的话，返回0。
+        Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
+        redisTemplate.expire(dispatchedKey, Duration.ofMinutes(10));
 
-        if (!Boolean.TRUE.equals(firstTime)) {
+        if (added == null || added == 0) {
             log.info("司机已被推送过此订单（重试链路），跳过 driverId={} orderId={}", driverId, orderId);
             return;
         }
