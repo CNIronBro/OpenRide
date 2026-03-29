@@ -3,6 +3,8 @@ package com.ironbro.didi.controller;
 import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.common.Result;
 import com.ironbro.didi.common.SessionUtils;
+import com.ironbro.didi.entity.Order;
+import com.ironbro.didi.mapper.OrderMapper;
 import com.ironbro.didi.service.DriverLocationService;
 import com.ironbro.didi.service.DriverService;
 import jakarta.servlet.http.HttpSession;
@@ -21,6 +23,7 @@ public class DriverLocationController {
 
     private final DriverLocationService locationService;
     private final DriverService driverService;
+    private final OrderMapper orderMapper;
 
     /**
      * 4.1 司机上报位置
@@ -44,6 +47,33 @@ public class DriverLocationController {
 
         locationService.reportLocation(driverId, lat, lng, ts, city);
         return Result.ok();
+    }
+
+    /**
+     * 乘客端查询当前司机实时位置（用于行程中页地图展示）
+     *
+     * 通过 orderId 找到对应司机，再从 Redis driver:location:pos:{driverId} 读取最新坐标。
+     * 乘客端行程中页每 5s 轮询一次，拿到坐标后更新高德地图 marker。
+     *
+     * @param orderId 订单 ID（乘客只能查自己的订单）
+     * @return { lat, lng } 或 null（司机尚未上报位置）
+     */
+    @GetMapping("/driver/location/current")
+    public Result<Map<String, Double>> currentLocation(
+            @RequestParam Long orderId,
+            HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "未登录");
+
+        Order order = orderMapper.selectById(orderId);
+        if (order == null || order.getDriverId() == null) {
+            return Result.ok(null);
+        }
+
+        double[] pos = locationService.getDriverPosition(order.getDriverId());
+        if (pos == null) return Result.ok(null);
+
+        return Result.ok(Map.of("lat", pos[0], "lng", pos[1]));
     }
 
     /**

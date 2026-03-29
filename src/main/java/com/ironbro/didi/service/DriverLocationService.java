@@ -204,6 +204,22 @@ public class DriverLocationService {
         redisTemplate.delete("driver:location:ts:" + driverId);
     }
 
+    /**
+     * 查询司机当前最新坐标（用于乘客端地图实时展示）
+     *
+     * 读取 driver:location:pos:{driverId}（每次上报都更新的原始坐标），
+     * 而非 trusted 坐标，以保证实时性。漂移点虽不写 GEO，但 pos 仍会更新，
+     * 前端地图 SDK 可自行做路线吸附修正。
+     *
+     * @return 坐标数组 [lat, lng]，若 key 不存在返回 null
+     */
+    public double[] getDriverPosition(Long driverId) {
+        String pos = redisTemplate.opsForValue().get("driver:location:pos:" + driverId);
+        if (pos == null) return null;
+        String[] parts = pos.split(",");
+        return new double[]{ Double.parseDouble(parts[0]), Double.parseDouble(parts[1]) };
+    }
+
     // ----------------------------------------------------------------
     // 工具方法：Haversine 公式计算两点距离（米）
     // ----------------------------------------------------------------

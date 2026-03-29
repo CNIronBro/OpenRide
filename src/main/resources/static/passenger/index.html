@@ -89,7 +89,7 @@
 
   /* 行程中页 */
   #intrip { background: #fff; }
-  .trip-map { background: linear-gradient(135deg, #e8f4fd, #d0e8f7); height: 200px; display: flex; align-items: center; justify-content: center; }
+  .trip-map { height: 200px; width: 100%; }
   .driver-card { margin: 16px; background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); padding: 16px; }
   .driver-card .driver-info { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
   .driver-avatar { width: 48px; height: 48px; background: #ff6b00; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 22px; }
@@ -353,12 +353,7 @@
   <div class="nav">
     <span>行程中</span>
   </div>
-  <div class="trip-map">
-    <div style="text-align:center;color:#666">
-      <div style="font-size:40px">🗺️</div>
-      <div style="font-size:13px;margin-top:6px">导航中（mock）</div>
-    </div>
-  </div>
+  <div class="trip-map" id="passenger-trip-map"></div>
   <div class="driver-card">
     <div class="driver-info">
       <div class="driver-avatar">👨</div>
@@ -429,6 +424,21 @@ let currentOrder = null;
 let reviewStar = 5;
 let lastEstimatedPrice = null;
 let selectedRoute = null; // 当前选中的路线数据
+
+// 高德地图实例和 marker（行程中页使用）
+let passengerTripMap = null;
+let passengerDriverMarker = null;
+
+/**
+ * 初始化乘客端行程中页的高德地图（仅初始化一次）
+ * @param {number} lat 初始纬度
+ * @param {number} lng 初始经度
+ */
+function initPassengerTripMap(lat, lng) {
+  if (passengerTripMap) return;
+  passengerTripMap = new AMap.Map('passenger-trip-map', { zoom: 15, center: [lng, lat] });
+  passengerDriverMarker = new AMap.Marker({ map: passengerTripMap, position: [lng, lat] });
+}
 
 // ----------------------------------------------------------------
 // 路线选择回调
@@ -639,6 +649,17 @@ async function pollTripStatus(orderId) {
   if (r.code !== 200) return;
   const order = r.data;
   updateTripSteps(order.status);
+
+  // 轮询司机实时位置，更新高德地图上的 marker
+  const locR = await api(`/driver/location/current?orderId=${orderId}`);
+  if (locR.code === 200 && locR.data && locR.data.lat && locR.data.lng) {
+    const { lat, lng } = locR.data;
+    initPassengerTripMap(lat, lng);
+    if (passengerDriverMarker) {
+      passengerDriverMarker.setPosition([lng, lat]);
+      passengerTripMap.setCenter([lng, lat]);
+    }
+  }
 
   if (order.status === 'FINISHED') {
     stopPolling();
@@ -854,6 +875,14 @@ api('/passenger/profile').then(r => {
     // loadNearbyCount();
   }
 }).catch(() => {});
+
+// 从后端获取高德 Key 后动态加载 SDK
+// 避免将 Key 硬编码在静态文件中
+fetch('/config/amap-key').then(r => r.json()).then(res => {
+  const script = document.createElement('script');
+  script.src = `https://webapi.amap.com/maps?v=2.0&key=${res.data.key}`;
+  document.head.appendChild(script);
+});
 </script>
 </body>
 </html>

@@ -93,6 +93,7 @@
   .trip-header { background: #ff6b00; padding: 16px; color: #fff; }
   .trip-title { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
   .trip-subtitle { font-size: 13px; opacity: 0.85; }
+  #trip-map { height: 200px; width: 100%; }
   .trip-body { padding: 16px; flex: 1; }
   .passenger-card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px; }
   .passenger-avatar { width: 44px; height: 44px; background: #f0f0f0; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; }
@@ -252,6 +253,7 @@
     <div class="trip-title" id="tripTitle">前往接客点</div>
     <div class="trip-subtitle" id="tripSubtitle">请尽快前往乘客位置</div>
   </div>
+  <div id="trip-map"></div>
   <div class="trip-body">
     <div class="passenger-card">
       <div class="passenger-avatar">👤</div>
@@ -728,6 +730,21 @@ async function tripAction() {
 // - 行程段（routeSegment='toDestination'）：逐点前进，走完后提醒司机已到达目的地
 // - routeArrived=true 时停止推进，等待司机手动点按钮
 // ----------------------------------------------------------------
+
+// 高德地图实例和司机位置 marker（行程中页使用）
+let tripMap = null;
+let driverMarker = null;
+
+/**
+ * 初始化行程中页的高德地图（仅初始化一次）
+ * 地图中心默认为国贸（路线A起点），接单后会随位置上报自动移动
+ */
+function initTripMap(lat, lng) {
+  if (tripMap) return; // 已初始化，不重复创建
+  tripMap = new AMap.Map('trip-map', { zoom: 15, center: [lng, lat] });
+  driverMarker = new AMap.Marker({ map: tripMap, position: [lng, lat] });
+}
+
 function startLocationReport() {
   if (state.locationTimer) return;
   state.locationTimer = setInterval(() => {
@@ -770,6 +787,16 @@ function startLocationReport() {
             alert('已到达目的地，请点击结束行程');
           }
         }
+      }
+    }
+
+    // 更新高德地图上的司机位置 marker
+    // 仅在行程中页（trip-map 容器可见时）才初始化和更新地图，避免在主页浪费资源
+    if (state.routeSegment) {
+      initTripMap(pos.lat, pos.lng);
+      if (driverMarker) {
+        driverMarker.setPosition([pos.lng, pos.lat]);
+        tripMap.setCenter([pos.lng, pos.lat]);
       }
     }
 
@@ -887,6 +914,15 @@ async function api(url, method, body) {
     return { ok: false, msg: '网络错误' };
   }
 }
+// ----------------------------------------------------------------
+// 启动：从后端获取高德 Key 后动态加载 SDK
+// 避免将 Key 硬编码在静态文件中（静态文件无法通过 .gitignore 保护）
+// ----------------------------------------------------------------
+fetch('/config/amap-key').then(r => r.json()).then(res => {
+  const script = document.createElement('script');
+  script.src = `https://webapi.amap.com/maps?v=2.0&key=${res.data.key}`;
+  document.head.appendChild(script);
+});
 </script>
 </body>
 </html>

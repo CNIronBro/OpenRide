@@ -1,6 +1,8 @@
 spring:
   application:
     name: DiDi
+  profiles:
+    include: keys
 
   datasource:
     url: jdbc:mysql://localhost:3309/didi?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
