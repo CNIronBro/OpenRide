@@ -670,8 +670,13 @@ async function pollTripStatus(orderId) {
     initPassengerTripMap(lat, lng, order.originLat, order.originLng);
     if (passengerDriverMarker) {
       passengerDriverMarker.setPosition([lng, lat]);
-      // 司机移动时重新自适应视野，保持司机和乘客起点都在可见范围内
-      passengerTripMap.setFitView([passengerDriverMarker, passengerOriginMarker]);
+      // 乘客已上车（IN_TRIP）后隐藏起点 marker，地图只跟随司机
+      if (order.status === 'IN_TRIP' || order.status === 'FINISHED') {
+        if (passengerOriginMarker) { passengerOriginMarker.hide(); }
+        passengerTripMap.setCenter([lng, lat]);
+      } else {
+        passengerTripMap.setFitView([passengerDriverMarker, passengerOriginMarker]);
+      }
     }
   }
 
