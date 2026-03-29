@@ -428,16 +428,28 @@ let selectedRoute = null; // 当前选中的路线数据
 // 高德地图实例和 marker（行程中页使用）
 let passengerTripMap = null;
 let passengerDriverMarker = null;
+let passengerOriginMarker = null;
 
 /**
  * 初始化乘客端行程中页的高德地图（仅初始化一次）
- * @param {number} lat 初始纬度
- * @param {number} lng 初始经度
+ * @param {number} driverLat  司机当前纬度
+ * @param {number} driverLng  司机当前经度
+ * @param {number} originLat  乘客起点纬度（固定不动）
+ * @param {number} originLng  乘客起点经度（固定不动）
  */
-function initPassengerTripMap(lat, lng) {
+function initPassengerTripMap(driverLat, driverLng, originLat, originLng) {
   if (passengerTripMap) return;
-  passengerTripMap = new AMap.Map('passenger-trip-map', { zoom: 15, center: [lng, lat] });
-  passengerDriverMarker = new AMap.Marker({ map: passengerTripMap, position: [lng, lat] });
+  passengerTripMap = new AMap.Map('passenger-trip-map', { zoom: 15, center: [driverLng, driverLat] });
+  // 司机 marker（跟随司机移动）
+  passengerDriverMarker = new AMap.Marker({ map: passengerTripMap, position: [driverLng, driverLat] });
+  // 乘客起点 marker（固定，让乘客感知司机距离自己还有多远）
+  passengerOriginMarker = new AMap.Marker({
+    map: passengerTripMap,
+    position: [originLng, originLat],
+    label: { content: '我的位置', offset: new AMap.Pixel(0, -30) }
+  });
+  // 自适应视野，使司机和乘客起点同时可见
+  passengerTripMap.setFitView([passengerDriverMarker, passengerOriginMarker]);
 }
 
 // ----------------------------------------------------------------
@@ -654,10 +666,12 @@ async function pollTripStatus(orderId) {
   const locR = await api(`/driver/location/current?orderId=${orderId}`);
   if (locR.code === 200 && locR.data && locR.data.lat && locR.data.lng) {
     const { lat, lng } = locR.data;
-    initPassengerTripMap(lat, lng);
+    // 传入乘客起点坐标，首次初始化时同时显示乘客位置 marker
+    initPassengerTripMap(lat, lng, order.originLat, order.originLng);
     if (passengerDriverMarker) {
       passengerDriverMarker.setPosition([lng, lat]);
-      passengerTripMap.setCenter([lng, lat]);
+      // 司机移动时重新自适应视野，保持司机和乘客起点都在可见范围内
+      passengerTripMap.setFitView([passengerDriverMarker, passengerOriginMarker]);
     }
   }
 
