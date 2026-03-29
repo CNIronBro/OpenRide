@@ -33,6 +33,17 @@ public class DriverController {
     }
 
     /**
+     * 乘客端查询司机基本信息（姓名、车牌、车型、评分）
+     * 无需登录，乘客在行程页通过订单中的 driverId 调用
+     *
+     * @param id driver 表主键（非 userId）
+     */
+    @GetMapping("/{id}/info")
+    public Result<Driver> driverInfo(@PathVariable Long id) {
+        return Result.ok(driverService.getDriverById(id));
+    }
+
+    /**
      * 3.4 司机上线 / 下线
      *
      * 请求体：{ "online": true/false }

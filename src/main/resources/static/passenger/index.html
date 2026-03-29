@@ -31,7 +31,7 @@
   .map-area { background: linear-gradient(135deg, #e8f4fd, #d0e8f7); height: 260px; position: relative; display: flex; align-items: center; justify-content: center; }
   .map-placeholder { text-align: center; color: #666; }
   .map-placeholder .icon { font-size: 48px; }
-  .nearby-count { position: absolute; top: 12px; right: 12px; background: rgba(255,107,0,0.9); color: #fff; border-radius: 12px; padding: 4px 10px; font-size: 12px; }
+  /*.nearby-count { position: absolute; top: 12px; right: 12px; background: rgba(255,107,0,0.9); color: #fff; border-radius: 12px; padding: 4px 10px; font-size: 12px; }*/
   .driver-dot { position: absolute; width: 12px; height: 12px; background: #ff6b00; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
   .order-panel { padding: 20px; flex: 1; }
   .order-panel h3 { font-size: 16px; color: #333; margin-bottom: 16px; }
@@ -175,7 +175,7 @@
       <div class="icon">🗺️</div>
       <div style="font-size:14px;margin-top:8px">地图（mock）</div>
     </div>
-    <div class="nearby-count" id="nearby-count">附近司机加载中...</div>
+<!--    <div class="nearby-count" id="nearby-count">附近司机加载中...</div>-->
     <div class="driver-dot" style="top:30%;left:40%"></div>
     <div class="driver-dot" style="top:55%;left:65%"></div>
     <div class="driver-dot" style="top:70%;left:30%"></div>
@@ -482,25 +482,25 @@ async function doLogin() {
     currentUserId = r.data.userId;
     document.getElementById('home-greeting').textContent = `你好 👋 去哪儿？`;
     showScreen('home');
-    loadNearbyCount();
+    // loadNearbyCount();
   } else {
     document.getElementById('login-err').textContent = r.message || '登录失败';
   }
 }
 
 // ---- 附近司机数量 ----
-async function loadNearbyCount() {
-  // 使用路线A起点作为默认查询坐标（乘客上车点）
-  const lat = selectedRoute ? selectedRoute.originLat : 39.9268;
-  const lng = selectedRoute ? selectedRoute.originLng : 116.4392;
-  const r = await api(`/dispatch/nearby?lat=${lat}&lng=${lng}&radius=5&city=default`);
-  const el = document.getElementById('nearby-count');
-  if (r.code === 200) {
-    el.textContent = `附近 ${r.data.length} 位司机`;
-  } else {
-    el.textContent = '附近司机查询失败';
-  }
-}
+// async function loadNearbyCount() {
+//   // 使用路线A起点作为默认查询坐标（乘客上车点）
+//   const lat = selectedRoute ? selectedRoute.originLat : 39.9268;
+//   const lng = selectedRoute ? selectedRoute.originLng : 116.4392;
+//   const r = await api(`/dispatch/nearby?lat=${lat}&lng=${lng}&radius=5&city=default`);
+//   const el = document.getElementById('nearby-count');
+//   if (r.code === 200) {
+//     el.textContent = `附近 ${r.data.length} 位司机`;
+//   } else {
+//     el.textContent = '附近司机查询失败';
+//   }
+// }
 
 // ---- 预估价格 ----
 async function estimatePrice() {
@@ -620,10 +620,13 @@ async function showTripScreen(order) {
 
   // 若有司机信息，查询司机详情
   if (order.driverId) {
-    // 通过订单中的 driverId 展示司机信息（阶段 6 完善司机端后可查询真实数据）
-    document.getElementById('trip-driver-name').textContent = `司机 #${order.driverId}`;
-    document.getElementById('trip-driver-car').textContent  = '车牌信息加载中...';
-    document.getElementById('trip-driver-rating').textContent = '⭐ -';
+    const dr = await api(`/driver/${order.driverId}/info`);
+    if (dr.code === 200 && dr.data) {
+      const d = dr.data;
+      document.getElementById('trip-driver-name').textContent = d.name || `司机 #${order.driverId}`;
+      document.getElementById('trip-driver-car').textContent  = [d.carColor, d.carModel, d.plate].filter(Boolean).join(' ') || '-';
+      document.getElementById('trip-driver-rating').textContent = d.rating ? `⭐ ${d.rating}` : '⭐ -';
+    }
   }
 
   updateTripSteps(order.status);
@@ -848,7 +851,7 @@ api('/passenger/profile').then(r => {
   if (r.code === 200) {
     currentUserId = r.data.id;
     showScreen('home');
-    loadNearbyCount();
+    // loadNearbyCount();
   }
 }).catch(() => {});
 </script>

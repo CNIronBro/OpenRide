@@ -1,9 +1,5 @@
 package com.ironbro.didi.service;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.ironbro.didi.entity.Driver;
-import com.ironbro.didi.enums.DriverStatus;
-import com.ironbro.didi.mapper.DriverMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.geo.Circle;

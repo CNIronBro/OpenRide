@@ -34,6 +34,19 @@ public class DriverService {
     private final OrderMapper orderMapper;
 
     /**
+     * 获取司机信息（按 driver.id 查询）
+     * 供乘客端行程页展示司机姓名、车牌、评分等信息
+     *
+     * @param driverId driver 表主键
+     * @return 司机实体
+     */
+    public Driver getDriverById(Long driverId) {
+        Driver driver = driverMapper.selectById(driverId);
+        if (driver == null) throw new BizException(404, "司机信息不存在");
+        return driver;
+    }
+
+    /**
      * 获取司机信息（按 userId 查询）
      *
      * @param userId session 中的 userId
