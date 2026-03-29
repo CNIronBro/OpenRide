@@ -610,7 +610,7 @@ async function pollOrderStatus() {
     stopPolling();
     showTripScreen(order);
     // 行程中继续轮询（更新步骤条）
-    pollTimer = setInterval(() => pollTripStatus(order.id), 5000);
+    pollTimer = setInterval(() => pollTripStatus(order.id), 2000);
   } else if (order.status === 'FINISHED') {
     stopPolling();
     showPaymentScreen(order);

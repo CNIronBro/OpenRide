@@ -43,9 +43,10 @@ import java.util.List;
 public class DriverLocationService {
 
     /**
-     * 漂移过滤阈值：5s 内移动超过 500m 视为漂移（约 360km/h）
+     * 漂移过滤阈值：2s 内移动超过 200m 视为漂移（约 360km/h）
+     * 上报间隔从 5s 缩短为 2s，阈值按比例同步调整（500m * 2/5 = 200m）
      */
-    private static final double MAX_DISTANCE_PER_INTERVAL_METERS = 500.0;
+    private static final double MAX_DISTANCE_PER_INTERVAL_METERS = 200.0;
 
     /** 漂移恢复所需的连续合理点数 */
     private static final int DRIFT_RECOVER_COUNT = 2;
