@@ -359,49 +359,81 @@ const ROUTES = {
       { lat: 39.9268, lng: 116.4392 }, // 三里屯（乘客上车点）
     ],
     // 从三里屯前往望京（目的地）
+    // 相邻点间距均 ≤ 150m，不触发漂移过滤（阈值 200m/2s）
     toDestination: [
       { lat: 39.9268, lng: 116.4392 }, // 三里屯出发
-      { lat: 39.9279, lng: 116.4407 },
-      { lat: 39.9289, lng: 116.4421 },
-      { lat: 39.9300, lng: 116.4436 },
-      { lat: 39.9310, lng: 116.4450 }, // 东直门外
-      { lat: 39.9322, lng: 116.4464 },
-      { lat: 39.9333, lng: 116.4477 },
-      { lat: 39.9345, lng: 116.4490 },
-      { lat: 39.9357, lng: 116.4503 },
-      { lat: 39.9369, lng: 116.4517 },
-      { lat: 39.9380, lng: 116.4530 }, // 麦子店
-      { lat: 39.9392, lng: 116.4545 },
-      { lat: 39.9403, lng: 116.4560 },
-      { lat: 39.9415, lng: 116.4575 },
-      { lat: 39.9427, lng: 116.4590 },
-      { lat: 39.9439, lng: 116.4605 },
-      { lat: 39.9450, lng: 116.4620 }, // 燕莎桥
-      { lat: 39.9464, lng: 116.4635 },
-      { lat: 39.9477, lng: 116.4650 },
-      { lat: 39.9490, lng: 116.4665 },
-      { lat: 39.9503, lng: 116.4680 },
-      { lat: 39.9517, lng: 116.4695 },
-      { lat: 39.9530, lng: 116.4710 }, // 望京南
-      { lat: 39.9542, lng: 116.4722 },
-      { lat: 39.9553, lng: 116.4733 },
-      { lat: 39.9565, lng: 116.4745 },
-      { lat: 39.9577, lng: 116.4757 },
-      { lat: 39.9589, lng: 116.4769 },
-      { lat: 39.9600, lng: 116.4780 }, // 望京西
-      { lat: 39.9615, lng: 116.4793 },
-      { lat: 39.9630, lng: 116.4805 },
-      { lat: 39.9645, lng: 116.4818 },
-      { lat: 39.9660, lng: 116.4830 }, // 望京中
-      { lat: 39.9673, lng: 116.4840 },
-      { lat: 39.9685, lng: 116.4850 },
-      { lat: 39.9698, lng: 116.4860 },
-      { lat: 39.9710, lng: 116.4870 }, // 望京东
-      { lat: 39.9720, lng: 116.4878 },
-      { lat: 39.9730, lng: 116.4885 },
-      { lat: 39.9740, lng: 116.4893 },
-      { lat: 39.9750, lng: 116.4900 }, // 望京花园
-      { lat: 39.9765, lng: 116.4910 },
+      { lat: 39.9275, lng: 116.4400 },
+      { lat: 39.9282, lng: 116.4408 },
+      { lat: 39.9289, lng: 116.4416 },
+      { lat: 39.9296, lng: 116.4424 },
+      { lat: 39.9303, lng: 116.4432 },
+      { lat: 39.9310, lng: 116.4440 }, // 东直门外
+      { lat: 39.9317, lng: 116.4448 },
+      { lat: 39.9324, lng: 116.4456 },
+      { lat: 39.9331, lng: 116.4464 },
+      { lat: 39.9338, lng: 116.4472 },
+      { lat: 39.9345, lng: 116.4480 },
+      { lat: 39.9352, lng: 116.4488 },
+      { lat: 39.9359, lng: 116.4496 },
+      { lat: 39.9366, lng: 116.4504 },
+      { lat: 39.9373, lng: 116.4512 },
+      { lat: 39.9380, lng: 116.4520 }, // 麦子店
+      { lat: 39.9387, lng: 116.4528 },
+      { lat: 39.9394, lng: 116.4536 },
+      { lat: 39.9401, lng: 116.4544 },
+      { lat: 39.9408, lng: 116.4552 },
+      { lat: 39.9415, lng: 116.4560 },
+      { lat: 39.9422, lng: 116.4568 },
+      { lat: 39.9429, lng: 116.4576 },
+      { lat: 39.9436, lng: 116.4584 },
+      { lat: 39.9443, lng: 116.4592 },
+      { lat: 39.9450, lng: 116.4600 }, // 燕莎桥
+      { lat: 39.9457, lng: 116.4608 },
+      { lat: 39.9464, lng: 116.4616 },
+      { lat: 39.9471, lng: 116.4624 },
+      { lat: 39.9478, lng: 116.4632 },
+      { lat: 39.9485, lng: 116.4640 },
+      { lat: 39.9492, lng: 116.4648 },
+      { lat: 39.9499, lng: 116.4656 },
+      { lat: 39.9506, lng: 116.4664 },
+      { lat: 39.9513, lng: 116.4672 },
+      { lat: 39.9520, lng: 116.4680 },
+      { lat: 39.9527, lng: 116.4688 },
+      { lat: 39.9534, lng: 116.4696 },
+      { lat: 39.9541, lng: 116.4704 },
+      { lat: 39.9548, lng: 116.4712 }, // 望京南
+      { lat: 39.9555, lng: 116.4720 },
+      { lat: 39.9562, lng: 116.4728 },
+      { lat: 39.9569, lng: 116.4736 },
+      { lat: 39.9576, lng: 116.4744 },
+      { lat: 39.9583, lng: 116.4752 },
+      { lat: 39.9590, lng: 116.4760 }, // 望京西
+      { lat: 39.9597, lng: 116.4767 },
+      { lat: 39.9604, lng: 116.4774 },
+      { lat: 39.9611, lng: 116.4781 },
+      { lat: 39.9618, lng: 116.4788 },
+      { lat: 39.9625, lng: 116.4795 },
+      { lat: 39.9632, lng: 116.4802 },
+      { lat: 39.9639, lng: 116.4809 },
+      { lat: 39.9646, lng: 116.4816 },
+      { lat: 39.9653, lng: 116.4820 }, // 望京中
+      { lat: 39.9660, lng: 116.4824 },
+      { lat: 39.9667, lng: 116.4828 },
+      { lat: 39.9674, lng: 116.4832 },
+      { lat: 39.9681, lng: 116.4836 },
+      { lat: 39.9688, lng: 116.4840 },
+      { lat: 39.9695, lng: 116.4844 },
+      { lat: 39.9702, lng: 116.4848 },
+      { lat: 39.9709, lng: 116.4852 }, // 望京东
+      { lat: 39.9716, lng: 116.4858 },
+      { lat: 39.9723, lng: 116.4864 },
+      { lat: 39.9730, lng: 116.4870 },
+      { lat: 39.9737, lng: 116.4876 },
+      { lat: 39.9744, lng: 116.4882 },
+      { lat: 39.9751, lng: 116.4888 },
+      { lat: 39.9758, lng: 116.4894 },
+      { lat: 39.9765, lng: 116.4900 }, // 望京花园
+      { lat: 39.9772, lng: 116.4907 },
       { lat: 39.9780, lng: 116.4920 }, // 望京（目的地）
     ]
   },
@@ -427,33 +459,36 @@ const ROUTES = {
       { lat: 39.9905, lng: 116.2912 }, // 北京大学南门（乘客上车点）
     ],
     // 从北大南门前往颐和园（目的地）
+    // 相邻点间距均 ≤ 150m，不触发漂移过滤（阈值 200m/2s）
     toDestination: [
       { lat: 39.9905, lng: 116.2912 }, // 北大南门出发
-      { lat: 39.9902, lng: 116.2897 },
-      { lat: 39.9898, lng: 116.2881 },
-      { lat: 39.9894, lng: 116.2866 },
-      { lat: 39.9890, lng: 116.2850 }, // 颐和园路
-      { lat: 39.9885, lng: 116.2835 },
-      { lat: 39.9880, lng: 116.2820 },
-      { lat: 39.9875, lng: 116.2805 },
-      { lat: 39.9870, lng: 116.2790 }, // 蔚秀园
-      { lat: 39.9864, lng: 116.2775 },
-      { lat: 39.9857, lng: 116.2760 },
-      { lat: 39.9851, lng: 116.2745 },
-      { lat: 39.9845, lng: 116.2730 }, // 圆明园西路
-      { lat: 39.9839, lng: 116.2718 },
-      { lat: 39.9832, lng: 116.2705 },
-      { lat: 39.9826, lng: 116.2693 },
-      { lat: 39.9820, lng: 116.2680 }, // 颐和园东路
-      { lat: 39.9810, lng: 116.2660 },
-      { lat: 39.9800, lng: 116.2640 }, // 颐和园南门路
-      { lat: 39.9793, lng: 116.2625 },
-      { lat: 39.9785, lng: 116.2610 }, // 颐和园东宫门
-      { lat: 39.9780, lng: 116.2600 },
-      { lat: 39.9775, lng: 116.2590 }, // 颐和园北宫门路
-      { lat: 39.9772, lng: 116.2583 },
-      { lat: 39.9768, lng: 116.2575 }, // 颐和园入口
-      { lat: 39.9765, lng: 116.2569 },
+      { lat: 39.9903, lng: 116.2897 },
+      { lat: 39.9900, lng: 116.2882 },
+      { lat: 39.9897, lng: 116.2867 },
+      { lat: 39.9894, lng: 116.2852 }, // 颐和园路
+      { lat: 39.9891, lng: 116.2837 },
+      { lat: 39.9888, lng: 116.2822 },
+      { lat: 39.9885, lng: 116.2807 },
+      { lat: 39.9882, lng: 116.2792 }, // 蔚秀园
+      { lat: 39.9878, lng: 116.2777 },
+      { lat: 39.9874, lng: 116.2762 },
+      { lat: 39.9870, lng: 116.2747 },
+      { lat: 39.9866, lng: 116.2732 }, // 圆明园西路
+      { lat: 39.9861, lng: 116.2718 },
+      { lat: 39.9856, lng: 116.2705 },
+      { lat: 39.9851, lng: 116.2693 },
+      { lat: 39.9846, lng: 116.2681 }, // 颐和园东路
+      { lat: 39.9840, lng: 116.2669 },
+      { lat: 39.9833, lng: 116.2657 },
+      { lat: 39.9826, lng: 116.2645 }, // 颐和园南门路
+      { lat: 39.9819, lng: 116.2633 },
+      { lat: 39.9812, lng: 116.2621 }, // 颐和园东宫门
+      { lat: 39.9805, lng: 116.2610 },
+      { lat: 39.9798, lng: 116.2600 },
+      { lat: 39.9791, lng: 116.2590 }, // 颐和园北宫门路
+      { lat: 39.9784, lng: 116.2581 },
+      { lat: 39.9777, lng: 116.2573 }, // 颐和园入口
+      { lat: 39.9770, lng: 116.2567 },
       { lat: 39.9762, lng: 116.2563 }, // 颐和园（目的地）
     ]
   },
@@ -483,37 +518,52 @@ const ROUTES = {
       { lat: 39.9158, lng: 116.4188 }, // 王府井（乘客上车点）
     ],
     // 从王府井前往朝阳公园（目的地）
+    // 相邻点间距均 ≤ 150m，不触发漂移过滤（阈值 200m/2s）
     toDestination: [
       { lat: 39.9158, lng: 116.4188 }, // 王府井出发
-      { lat: 39.9164, lng: 116.4211 },
-      { lat: 39.9169, lng: 116.4234 },
-      { lat: 39.9175, lng: 116.4257 },
-      { lat: 39.9180, lng: 116.4280 }, // 东四十条
-      { lat: 39.9188, lng: 116.4300 },
-      { lat: 39.9195, lng: 116.4320 },
-      { lat: 39.9203, lng: 116.4340 },
-      { lat: 39.9210, lng: 116.4360 }, // 朝阳门外
-      { lat: 39.9218, lng: 116.4378 },
-      { lat: 39.9225, lng: 116.4395 },
-      { lat: 39.9233, lng: 116.4413 },
-      { lat: 39.9240, lng: 116.4430 }, // 工体北路
-      { lat: 39.9248, lng: 116.4450 },
-      { lat: 39.9255, lng: 116.4470 },
-      { lat: 39.9263, lng: 116.4490 },
-      { lat: 39.9270, lng: 116.4510 }, // 农展馆
-      { lat: 39.9278, lng: 116.4528 },
-      { lat: 39.9285, lng: 116.4545 },
-      { lat: 39.9293, lng: 116.4563 },
-      { lat: 39.9300, lng: 116.4580 }, // 朝阳公园西门路
-      { lat: 39.9305, lng: 116.4593 },
-      { lat: 39.9310, lng: 116.4605 },
-      { lat: 39.9315, lng: 116.4618 },
-      { lat: 39.9320, lng: 116.4630 }, // 朝阳公园南门
-      { lat: 39.9328, lng: 116.4645 },
-      { lat: 39.9335, lng: 116.4660 }, // 朝阳公园西路
-      { lat: 39.9340, lng: 116.4670 },
-      { lat: 39.9345, lng: 116.4680 }, // 朝阳公园入口
-      { lat: 39.9349, lng: 116.4686 },
+      { lat: 39.9162, lng: 116.4200 },
+      { lat: 39.9166, lng: 116.4212 },
+      { lat: 39.9170, lng: 116.4224 },
+      { lat: 39.9174, lng: 116.4236 },
+      { lat: 39.9178, lng: 116.4248 },
+      { lat: 39.9182, lng: 116.4260 }, // 东四十条
+      { lat: 39.9186, lng: 116.4272 },
+      { lat: 39.9190, lng: 116.4284 },
+      { lat: 39.9194, lng: 116.4296 },
+      { lat: 39.9198, lng: 116.4308 },
+      { lat: 39.9202, lng: 116.4320 },
+      { lat: 39.9206, lng: 116.4332 },
+      { lat: 39.9210, lng: 116.4344 }, // 朝阳门外
+      { lat: 39.9214, lng: 116.4356 },
+      { lat: 39.9218, lng: 116.4368 },
+      { lat: 39.9222, lng: 116.4380 },
+      { lat: 39.9226, lng: 116.4392 },
+      { lat: 39.9230, lng: 116.4404 },
+      { lat: 39.9234, lng: 116.4416 },
+      { lat: 39.9238, lng: 116.4428 }, // 工体北路
+      { lat: 39.9242, lng: 116.4440 },
+      { lat: 39.9246, lng: 116.4452 },
+      { lat: 39.9250, lng: 116.4464 },
+      { lat: 39.9254, lng: 116.4476 },
+      { lat: 39.9258, lng: 116.4488 },
+      { lat: 39.9262, lng: 116.4500 }, // 农展馆
+      { lat: 39.9266, lng: 116.4512 },
+      { lat: 39.9270, lng: 116.4524 },
+      { lat: 39.9274, lng: 116.4536 },
+      { lat: 39.9278, lng: 116.4548 },
+      { lat: 39.9282, lng: 116.4560 },
+      { lat: 39.9286, lng: 116.4572 },
+      { lat: 39.9290, lng: 116.4584 }, // 朝阳公园西门路
+      { lat: 39.9296, lng: 116.4594 },
+      { lat: 39.9302, lng: 116.4604 },
+      { lat: 39.9308, lng: 116.4614 },
+      { lat: 39.9314, lng: 116.4624 }, // 朝阳公园南门
+      { lat: 39.9320, lng: 116.4634 },
+      { lat: 39.9326, lng: 116.4644 },
+      { lat: 39.9332, lng: 116.4654 }, // 朝阳公园西路
+      { lat: 39.9337, lng: 116.4662 },
+      { lat: 39.9342, lng: 116.4670 }, // 朝阳公园入口
+      { lat: 39.9347, lng: 116.4678 },
       { lat: 39.9352, lng: 116.4692 }, // 朝阳公园（目的地）
     ]
   }
@@ -537,6 +587,8 @@ let state = {
   routeIndex: 0,         // 当前路线段的坐标索引
   routeSegment: null,    // 当前行进段：'toPickup' | 'toDestination' | null（等单时停在起点）
   routeArrived: false,   // 当前段是否已走完（等待司机手动确认）
+  passengerLat: null,    // 乘客上车点纬度（接单时从订单获取，用于地图显示）
+  passengerLng: null,    // 乘客上车点经度
 };
 
 // ----------------------------------------------------------------
@@ -706,6 +758,9 @@ async function acceptOrder() {
   state.routeSegment = 'toPickup';
   state.routeIndex = 0;
   state.routeArrived = false;
+  // 保存乘客上车点坐标，用于行程中页地图显示乘客位置
+  state.passengerLat = res.data.originLat ? parseFloat(res.data.originLat) : null;
+  state.passengerLng = res.data.originLng ? parseFloat(res.data.originLng) : null;
   renderTripScreen(res.data);
   showScreen('trip');
 }
@@ -786,6 +841,10 @@ async function tripAction() {
     state.routeSegment = null;
     state.routeIndex = 0;
     state.routeArrived = false;
+    state.passengerLat = null;
+    state.passengerLng = null;
+    // 重置地图，下次行程重新初始化
+    tripMap = null; driverMarker = null; passengerMarker = null;
     state.isOnline = true;
     document.getElementById('onlineSwitch').checked = true;
     document.getElementById('onlineLabel').textContent = '在线';
@@ -810,15 +869,28 @@ async function tripAction() {
 // 高德地图实例和司机位置 marker（行程中页使用）
 let tripMap = null;
 let driverMarker = null;
+let passengerMarker = null; // 乘客位置 marker（接客阶段显示，上车后隐藏）
 
 /**
  * 初始化行程中页的高德地图（仅初始化一次）
  * 地图中心默认为国贸（路线A起点），接单后会随位置上报自动移动
+ * 若有乘客坐标，同时在地图上标注乘客位置，让司机感知距乘客的距离
  */
 function initTripMap(lat, lng) {
   if (tripMap) return; // 已初始化，不重复创建
   tripMap = new AMap.Map('trip-map', { zoom: 15, center: [lng, lat] });
   driverMarker = new AMap.Marker({ map: tripMap, position: [lng, lat] });
+
+  // 若有乘客上车点坐标，添加乘客位置 marker（接客阶段显示，乘客上车后隐藏）
+  if (state.passengerLat && state.passengerLng) {
+    passengerMarker = new AMap.Marker({
+      map: tripMap,
+      position: [state.passengerLng, state.passengerLat],
+      label: { content: '乘客位置', offset: new AMap.Pixel(0, -30) }
+    });
+    // 自适应视野，使司机和乘客同时可见
+    tripMap.setFitView([driverMarker, passengerMarker]);
+  }
 }
 
 function startLocationReport() {
@@ -872,7 +944,18 @@ function startLocationReport() {
       initTripMap(pos.lat, pos.lng);
       if (driverMarker) {
         driverMarker.setPosition([pos.lng, pos.lat]);
-        tripMap.setCenter([pos.lng, pos.lat]);
+        // IN_TRIP（乘客已上车）后隐藏乘客 marker，地图只跟随司机
+        if (state.tripStatus === 'IN_TRIP') {
+          if (passengerMarker) { passengerMarker.hide(); }
+          tripMap.setCenter([pos.lng, pos.lat]);
+        } else {
+          // 接客阶段：自适应视野，使司机和乘客位置同时可见
+          if (passengerMarker) {
+            tripMap.setFitView([driverMarker, passengerMarker]);
+          } else {
+            tripMap.setCenter([pos.lng, pos.lat]);
+          }
+        }
       }
     }
 
@@ -971,7 +1054,9 @@ function doLogout() {
   state = { userId: null, driverId: null, driverInfo: null, isOnline: false,
             currentOrderId: null, tripStatus: null, pollTimer: null,
             countdownTimer: null, locationTimer: null,
-            routeKey: null, routeIndex: 0, routeSegment: null, routeArrived: false };
+            routeKey: null, routeIndex: 0, routeSegment: null, routeArrived: false,
+            passengerLat: null, passengerLng: null };
+  tripMap = null; driverMarker = null; passengerMarker = null;
   showScreen('login');
 }
 

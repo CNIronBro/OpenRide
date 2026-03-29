@@ -20,22 +20,35 @@ import java.util.List;
  *
  * 职责：
  * 1. 位置上报：写入 Redis GEO + 刷新心跳 TTL
- * 2. 治理：乱序过滤、漂移过滤（500m/5s）
+ * 2. 治理：乱序过滤、漂移过滤（200m/2s）
  * 3. 附近司机召回：GEORADIUS
  * 4. 假在线检测：由 xxl-job FakeOnlineCleanJob 定期调用 removeFromOnline 完成清理
  *
  * Redis Key 设计：
- *   driver:online:{city}                ZSET(GEO)  在线司机地理位置（空间检索用）
- *   driver:heartbeat:{driverId}         STRING     心跳，TTL=30s
- *   driver:location:ts:{driverId}       STRING     上次上报时间戳，用于乱序过滤
- *   driver:location:pos:{driverId}      STRING     最新原始坐标 "lat,lng"，每次上报都更新，漂移判断基准
- *   driver:location:trusted:{driverId}  STRING     最新可信坐标 "lat,lng"，仅连续合理点确认后更新，GEO 写入基准
- *   driver:location:ok_count:{driverId} STRING     漂移恢复计数；key 存在即代表处于漂移态，TTL=30s
+ *   driver:online:{city}                  ZSET(GEO)  在线司机地理位置（空间检索用）
+ *   driver:heartbeat:{driverId}           STRING     心跳，TTL=30s
+ *   driver:location:ts:{driverId}         STRING     上次上报时间戳，用于乱序过滤
+ *   driver:location:trusted:{driverId}    STRING     最新可信坐标 "lat,lng"，GEO 写入基准，仅通过漂移检测的点才更新
+ *   driver:location:candidate:{driverId}  STRING     漂移恢复候选坐标；DRIFTING 态下第一个合理点存此处，后续合理点与此比较
+ *   driver:location:ok_count:{driverId}   STRING     漂移恢复计数；key 存在即代表处于 DRIFTING 态，TTL=30s
  *
- * 漂移过滤状态机：
- *   NORMAL  态（ok_count key 不存在）：每个合理点直接更新 trusted + 写 GEO
- *   DRIFTING 态（ok_count key 存在）：需连续 2 个合理点才恢复到 NORMAL 并写 GEO
- *   任意漂移点：ok_count 重置为 0（进入/维持 DRIFTING 态），不写 GEO，但刷新心跳
+ * 漂移过滤状态机（V5）：
+ *
+ *   NORMAL 态（ok_count key 不存在）：
+ *     合理点 → 直接更新 trusted + 写 GEO
+ *     漂移点 → 进入 DRIFTING 态，ok_count=0，清除 candidate
+ *
+ *   DRIFTING 态（ok_count key 存在）：
+ *     漂移点 → 维持 DRIFTING 态，ok_count=0，清除 candidate
+ *     第一个合理点（ok_count=0，相对 trusted 合理）→ 存入 candidate，ok_count=1，不写 GEO
+ *     后续合理点（ok_count>=1）→ 与 candidate 比较（而非 trusted）：
+ *       - 与 candidate 距离合理 → 恢复 NORMAL，更新 trusted，写 GEO，删除 ok_count/candidate
+ *       - 与 candidate 距离超阈值 → candidate 更新为当前点，ok_count 重置为 1（滑动窗口）
+ *
+ * 关键设计决策：
+ *   恢复时用 candidate 而非 trusted 作为比较基准。
+ *   原因：trusted 冻结在漂移前位置，司机持续移动后任何新点相对 trusted 都超阈值，
+ *   会陷入永远无法恢复的死锁（V4 的根本缺陷）。candidate 随合理点滑动，不会锁死。
  */
 @Slf4j
 @Service
@@ -44,12 +57,9 @@ public class DriverLocationService {
 
     /**
      * 漂移过滤阈值：2s 内移动超过 200m 视为漂移（约 360km/h）
-     * 上报间隔从 5s 缩短为 2s，阈值按比例同步调整（500m * 2/5 = 200m）
+     * 上报间隔 2s，阈值 200m（500m * 2/5）
      */
     private static final double MAX_DISTANCE_PER_INTERVAL_METERS = 200.0;
-
-    /** 漂移恢复所需的连续合理点数 */
-    private static final int DRIFT_RECOVER_COUNT = 2;
 
     /** 心跳 TTL（秒），超过此时间未上报视为假在线 */
     private static final int HEARTBEAT_TTL_SECONDS = 30;
@@ -59,14 +69,10 @@ public class DriverLocationService {
     /**
      * 司机上报位置
      *
-     * 漂移过滤采用双坐标 + 状态机设计：
-     * - pos（原始坐标）：每次上报都更新，作为下次漂移判断的基准
-     * - trusted（可信坐标）：仅在连续合理点确认后更新，写入 GEO 的依据
-     * - ok_count（恢复计数）：key 存在即代表处于漂移态；连续 DRIFT_RECOVER_COUNT 个合理点后删除该 key，恢复正常态
-     *
-     * 正常态：合理点 → 直接更新 trusted + 写 GEO
-     * 漂移态：合理点 → ok_count+1，达到阈值才恢复；漂移点 → ok_count 重置为 0
-     * 所有路径最终都刷新心跳，避免漂移期间被误判为假在线
+     * 漂移过滤采用 trusted + candidate 双坐标状态机（V5）：
+     * - trusted：可信坐标，GEO 写入基准，不会被漂移点污染
+     * - candidate：漂移恢复候选坐标，DRIFTING 态下用于相邻两点互比，
+     *              避免与冻结的 trusted 比较导致"司机移动后永远无法恢复"的死锁
      *
      * @param driverId  司机 ID
      * @param lat       纬度
@@ -77,8 +83,8 @@ public class DriverLocationService {
      */
     public boolean reportLocation(Long driverId, double lat, double lng, long timestamp, String city) {
         String heartbeatKey  = "driver:heartbeat:" + driverId;
-        String posKey        = "driver:location:pos:" + driverId;
         String trustedKey    = "driver:location:trusted:" + driverId;
+        String candidateKey  = "driver:location:candidate:" + driverId;
         String okCountKey    = "driver:location:ok_count:" + driverId;
         String tsKey         = "driver:location:ts:" + driverId;
         String geoKey        = "driver:online:" + city;
@@ -91,14 +97,7 @@ public class DriverLocationService {
         }
         redisTemplate.opsForValue().set(tsKey, String.valueOf(timestamp), Duration.ofMinutes(5));
 
-        // pos 每次都更新，仅用于辅助判断（当前实际以 trusted 为主要基准）
-        redisTemplate.opsForValue().set(posKey, lat + "," + lng, Duration.ofMinutes(5));
-
-        // trusted 是漂移判断和 GEO 写入的基准
-        // 用 trusted == null 而非 lastPos == null 判断首次上报：
-        // pos 可能因 TTL 过期被清掉，但 trusted 仍存在，此时不应跳过漂移检测
         String trustedPos = redisTemplate.opsForValue().get(trustedKey);
-
         boolean geoUpdated = false;
 
         if (trustedPos == null) {
@@ -108,41 +107,62 @@ public class DriverLocationService {
             geoUpdated = true;
             log.info("位置上报（首次），lat={}, lng={}", lat, lng);
         } else {
-            // 漂移判断：与 trusted（可信坐标）比较，trusted 不会被坏点污染
-            double[] ref = parsePos(trustedPos);
-            double distMeters = haversineMeters(ref[0], ref[1], lat, lng);
+            double[] trusted = parsePos(trustedPos);
+            double distFromTrusted = haversineMeters(trusted[0], trusted[1], lat, lng);
+            String okCountStr = redisTemplate.opsForValue().get(okCountKey);
 
-            if (distMeters > MAX_DISTANCE_PER_INTERVAL_METERS) {
-                // 漂移：进入/维持漂移态，ok_count 重置为 0
-                // TTL=30s：若 30s 内无任何上报，漂移态自动过期，下次上报重新评估
-                redisTemplate.opsForValue().set(okCountKey, "0", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
-                log.warn("位置漂移，丢弃 driverId={} dist={}m，refLat={}, refLng={}, lat={}, lng={}",
-                        driverId, (int) distMeters, ref[0], ref[1], lat, lng);
-            } else {
-                // 合理点：根据当前状态决定是否写 GEO
-                String okCountStr = redisTemplate.opsForValue().get(okCountKey);
-
-                if (okCountStr == null) {
-                    // 正常态（ok_count key 不存在）：直接更新 trusted + 写 GEO
+            if (okCountStr == null) {
+                // ── NORMAL 态 ──
+                if (distFromTrusted > MAX_DISTANCE_PER_INTERVAL_METERS) {
+                    // 漂移点：进入 DRIFTING 态
+                    redisTemplate.opsForValue().set(okCountKey, "0", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
+                    redisTemplate.delete(candidateKey);
+                    log.warn("位置漂移，丢弃 driverId={} dist={}m，refLat={}, refLng={}, lat={}, lng={}",
+                            driverId, (int) distFromTrusted, trusted[0], trusted[1], lat, lng);
+                } else {
+                    // 合理点：直接更新 trusted + 写 GEO
                     redisTemplate.opsForValue().set(trustedKey, lat + "," + lng, Duration.ofMinutes(5));
                     redisTemplate.opsForGeo().add(geoKey, new Point(lng, lat), String.valueOf(driverId));
                     geoUpdated = true;
                     log.info("位置上报，lat={}, lng={}", lat, lng);
+                }
+            } else {
+                // ── DRIFTING 态 ──
+                // 注意：此处不再与 trusted 比较。trusted 冻结在漂移前位置，
+                // 司机持续移动后任何新点相对 trusted 都超阈值，会导致永远无法恢复的死锁。
+                // 恢复逻辑完全基于相邻点互比（candidate 滑动窗口）。
+                int okCount = Integer.parseInt(okCountStr);
+
+                if (okCount == 0) {
+                    // 第一个点：无条件存入 candidate，不与 trusted 比较
+                    redisTemplate.opsForValue().set(candidateKey, lat + "," + lng, Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
+                    redisTemplate.opsForValue().set(okCountKey, "1", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
+                    log.debug("漂移恢复中（candidate 建立）driverId={} lat={}, lng={}", driverId, lat, lng);
                 } else {
-                    // 漂移恢复态：累积连续合理点计数
-                    int okCount = Integer.parseInt(okCountStr) + 1;
-                    if (okCount >= DRIFT_RECOVER_COUNT) {
-                        // 连续 DRIFT_RECOVER_COUNT 个合理点，恢复正常态
-                        redisTemplate.opsForValue().set(trustedKey, lat + "," + lng, Duration.ofMinutes(5));
-                        redisTemplate.opsForGeo().add(geoKey, new Point(lng, lat), String.valueOf(driverId));
-                        redisTemplate.delete(okCountKey); // 删除 key = 退出漂移态
-                        geoUpdated = true;
-                        log.info("漂移恢复，位置已更新 driverId={} lat={}, lng={}", driverId, lat, lng);
+                    // 后续合理点：与 candidate 比较（滑动窗口，避免与冻结的 trusted 比较导致死锁）
+                    String candidatePos = redisTemplate.opsForValue().get(candidateKey);
+                    if (candidatePos == null) {
+                        // candidate 意外过期（极端情况），重置状态重新积累
+                        redisTemplate.opsForValue().set(okCountKey, "0", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
+                        log.debug("candidate 过期，重置漂移恢复状态 driverId={}", driverId);
                     } else {
-                        // 合理点不足，继续等待
-                        redisTemplate.opsForValue().set(okCountKey, String.valueOf(okCount),
-                                Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
-                        log.debug("漂移恢复中 driverId={} okCount={}/{}", driverId, okCount, DRIFT_RECOVER_COUNT);
+                        double[] candidate = parsePos(candidatePos);
+                        double distFromCandidate = haversineMeters(candidate[0], candidate[1], lat, lng);
+
+                        if (distFromCandidate > MAX_DISTANCE_PER_INTERVAL_METERS) {
+                            // 与 candidate 距离超阈值：滑动窗口，candidate 更新为当前点，重新积累
+                            redisTemplate.opsForValue().set(candidateKey, lat + "," + lng, Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
+                            redisTemplate.opsForValue().set(okCountKey, "1", Duration.ofSeconds(HEARTBEAT_TTL_SECONDS));
+                            log.warn("漂移恢复中跳变，滑动 candidate driverId={} dist={}m", driverId, (int) distFromCandidate);
+                        } else {
+                            // 连续两个相邻合理点，恢复 NORMAL 态
+                            redisTemplate.opsForValue().set(trustedKey, lat + "," + lng, Duration.ofMinutes(5));
+                            redisTemplate.opsForGeo().add(geoKey, new Point(lng, lat), String.valueOf(driverId));
+                            redisTemplate.delete(okCountKey);
+                            redisTemplate.delete(candidateKey);
+                            geoUpdated = true;
+                            log.info("漂移恢复，位置已更新 driverId={} lat={}, lng={}", driverId, lat, lng);
+                        }
                     }
                 }
             }
@@ -154,7 +174,7 @@ public class DriverLocationService {
     }
 
     // ----------------------------------------------------------------
-    // 4.4 附近司机召回
+    // 附近司机召回
     // ----------------------------------------------------------------
 
     /**
@@ -189,7 +209,7 @@ public class DriverLocationService {
     }
 
     // ----------------------------------------------------------------
-    // 4.5 司机主动下线：从 GEO 集合移除，清除心跳
+    // 司机主动下线：从 GEO 集合移除，清除心跳
     // ----------------------------------------------------------------
 
     /**
@@ -199,30 +219,27 @@ public class DriverLocationService {
     public void removeFromOnline(Long driverId, String city) {
         redisTemplate.opsForGeo().remove("driver:online:" + city, String.valueOf(driverId));
         redisTemplate.delete("driver:heartbeat:" + driverId);
-        redisTemplate.delete("driver:location:pos:" + driverId);
         redisTemplate.delete("driver:location:trusted:" + driverId);
+        redisTemplate.delete("driver:location:candidate:" + driverId);
         redisTemplate.delete("driver:location:ok_count:" + driverId);
         redisTemplate.delete("driver:location:ts:" + driverId);
     }
 
     /**
-     * 查询司机当前最新坐标（用于乘客端地图实时展示）
+     * 查询司机当前最新可信坐标（用于乘客端地图实时展示）
      *
-     * 读取 driver:location:pos:{driverId}（每次上报都更新的原始坐标），
-     * 而非 trusted 坐标，以保证实时性。漂移点虽不写 GEO，但 pos 仍会更新，
-     * 前端地图 SDK 可自行做路线吸附修正。
+     * 读取 trusted 坐标，避免漂移点导致乘客端地图跳变。
      *
      * @return 坐标数组 [lat, lng]，若 key 不存在返回 null
      */
     public double[] getDriverPosition(Long driverId) {
-        String pos = redisTemplate.opsForValue().get("driver:location:pos:" + driverId);
+        String pos = redisTemplate.opsForValue().get("driver:location:trusted:" + driverId);
         if (pos == null) return null;
-        String[] parts = pos.split(",");
-        return new double[]{ Double.parseDouble(parts[0]), Double.parseDouble(parts[1]) };
+        return parsePos(pos);
     }
 
     // ----------------------------------------------------------------
-    // 工具方法：Haversine 公式计算两点距离（米）
+    // 工具方法
     // ----------------------------------------------------------------
 
     private double[] parsePos(String pos) {
@@ -231,10 +248,10 @@ public class DriverLocationService {
     }
 
     /**
-     * 用于漂移过滤中判断相邻两次上报的位移是否合理
+     * Haversine 公式计算两点球面距离（米），用于漂移过滤中判断相邻两次上报的位移是否合理
      */
     private double haversineMeters(double lat1, double lng1, double lat2, double lng2) {
-        final double R = 6371000; // 地球半径（米）
+        final double R = 6371000;
         double dLat = Math.toRadians(lat2 - lat1);
         double dLng = Math.toRadians(lng2 - lng1);
         double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
