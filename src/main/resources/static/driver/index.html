@@ -624,7 +624,7 @@ async function tripAction() {
     state.passengerLat = null;
     state.passengerLng = null;
     // 重置地图，下次行程重新初始化
-    tripMap = null; driverMarker = null; passengerMarker = null; mapUserInteracted = false;
+    tripMap = null; driverMarker = null; passengerMarker = null;
     driverLastPos = null;
     if (driverRafId) { cancelAnimationFrame(driverRafId); driverRafId = null; }
     state.isOnline = true;
@@ -684,24 +684,10 @@ async function updateDriverMapFromBackend() {
   });
 }
 
-/**
- * 更新司机端地图视角（主视角跟随司机）
- * 接客阶段同时显示乘客 marker 并自适应视野；IN_TRIP 后只跟随司机
- * 若用户已手动缩放/拖拽地图（mapUserInteracted=true），则不再强制调整视角
- */
 function updateDriverMapView(pos) {
+  // 视角完全交由用户控制，仅在 IN_TRIP 阶段隐藏乘客 marker
   if (!tripMap) return;
-  if (mapUserInteracted) return; // 用户已手动操作地图，不强制跟随
-  if (state.tripStatus === 'IN_TRIP') {
-    if (passengerMarker) passengerMarker.hide();
-    tripMap.setCenter([pos.lng, pos.lat]);
-  } else {
-    if (passengerMarker) {
-      tripMap.setFitView([driverMarker, passengerMarker]);
-    } else {
-      tripMap.setCenter([pos.lng, pos.lat]);
-    }
-  }
+  if (state.tripStatus === 'IN_TRIP' && passengerMarker) passengerMarker.hide();
 }
 
 /**
@@ -834,7 +820,6 @@ const SPEED_MPS = 40 / 3.6;
 let tripMap = null;
 let driverMarker = null;
 let passengerMarker = null; // 乘客位置 marker（接客阶段显示，上车后隐藏）
-let mapUserInteracted = false; // 用户手动缩放/拖拽后置 true，停止强制跟随视角
 
 /**
  * 初始化行程中页的高德地图（仅初始化一次）
@@ -845,10 +830,6 @@ function initTripMap(lat, lng) {
   tripMap = new AMap.Map('trip-map', { zoom: 15, center: [lng, lat] });
   driverMarker = new AMap.Marker({ map: tripMap, position: [lng, lat] });
 
-  // 用户手动缩放或拖拽后，停止强制跟随视角，避免打断用户操作
-  tripMap.on('zoomchange', () => { mapUserInteracted = true; });
-  tripMap.on('dragend',    () => { mapUserInteracted = true; });
-
   // 若有乘客上车点坐标，添加乘客位置 marker（接客阶段显示，乘客上车后隐藏）
   if (state.passengerLat && state.passengerLng) {
     passengerMarker = new AMap.Marker({
@@ -856,8 +837,6 @@ function initTripMap(lat, lng) {
       position: [state.passengerLng, state.passengerLat],
       label: { content: '乘客位置', offset: new AMap.Pixel(0, -30) }
     });
-    // 自适应视野，使司机和乘客同时可见
-    tripMap.setFitView([driverMarker, passengerMarker]);
   }
 }
 
