@@ -152,7 +152,7 @@ public class OrderService {
      * @param driverId 司机的 driver.id（非 user_id）
      */
     @Transactional
-    public Order acceptOrder(Long orderId, Long driverId) {
+    public Order acceptOrder(Long orderId, Long driverId, String routeKey) {
         Order order = orderMapper.selectById(orderId);
         if (order == null) throw new BizException("订单不存在");
         if (order.getStatus() != OrderStatus.DISPATCHING) {
@@ -164,6 +164,8 @@ public class OrderService {
         order.setDriverId(driverId);
         order.setStatus(OrderStatus.ACCEPTED);
         order.setAcceptedAt(LocalDateTime.now());
+        // 将司机选择的预设路线标识写入订单，供前端贴路插值动画使用
+        order.setRouteKey(routeKey);
         int rows = orderMapper.updateById(order);
         if (rows == 0) {
             // 乐观锁冲突：订单已被其他司机抢走

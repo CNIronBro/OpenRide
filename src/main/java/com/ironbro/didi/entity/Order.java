@@ -79,6 +79,9 @@ public class Order {
     @Version
     private Integer version;
 
+    /** 司机接单时选择的预设路线标识（A/B/C），用于前端贴路插值动画 */
+    private String routeKey;
+
     private LocalDateTime createdAt;
 
     /**

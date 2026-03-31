@@ -745,7 +745,7 @@ async function acceptOrder() {
   clearCountdown();
   document.getElementById('orderModal').classList.remove('show');
 
-  const res = await api('/order/' + state.currentOrderId + '/accept', 'POST');
+  const res = await api('/order/' + state.currentOrderId + '/accept', 'POST', { routeKey: state.routeKey });
   if (!res.ok) {
     alert(res.msg || '接单失败，订单已被抢走');
     state.currentOrderId = null;
@@ -845,6 +845,8 @@ async function tripAction() {
     state.passengerLng = null;
     // 重置地图，下次行程重新初始化
     tripMap = null; driverMarker = null; passengerMarker = null;
+    driverLastPos = null;
+    if (driverRafId) { cancelAnimationFrame(driverRafId); driverRafId = null; }
     state.isOnline = true;
     document.getElementById('onlineSwitch').checked = true;
     document.getElementById('onlineLabel').textContent = '在线';
@@ -857,7 +859,180 @@ async function tripAction() {
 }
 
 // ----------------------------------------------------------------
-// 位置上报（每 5s 上报一次，仅在线时上报）
+// 司机端地图：轮询后端坐标 + 贴路 RAF 插值动画
+//
+// 设计说明：
+// - 后端是 source of truth，前端不直接读 ROUTES 移动 marker
+// - 每次上报（2s）后立即轮询后端拿最新坐标，在上一坐标到新坐标之间
+//   沿 routePoints 做 RAF 插值，视觉上 marker 沿真实道路平滑移动
+// - 主视角跟随司机
+// ----------------------------------------------------------------
+
+// 上一次已知的司机坐标（用于插值起点）
+let driverLastPos = null;
+// 当前正在执行的 RAF 动画 id（避免多个动画并发）
+let driverRafId = null;
+
+/**
+ * 轮询后端获取司机最新坐标，并触发贴路插值动画
+ * 在每次位置上报后调用，保证动画与上报节奏一致（2s 一次）
+ */
+async function updateDriverMapFromBackend() {
+  if (!state.currentOrderId) return;
+  const res = await api('/driver/location/current?orderId=' + state.currentOrderId, 'GET');
+  if (!res.ok || !res.data || !res.data.lat) return;
+
+  const newPos = { lat: res.data.lat, lng: res.data.lng };
+  const routePoints = res.data.routePoints || null;
+
+  // 首次：初始化地图，直接定位，不做动画
+  initTripMap(newPos.lat, newPos.lng);
+  if (!driverLastPos) {
+    driverLastPos = newPos;
+    if (driverMarker) driverMarker.setPosition([newPos.lng, newPos.lat]);
+    updateDriverMapView(newPos);
+    return;
+  }
+
+  // 取消上一个未完成的动画，开始新动画
+  if (driverRafId) { cancelAnimationFrame(driverRafId); driverRafId = null; }
+  const fromPos = driverLastPos;
+  driverLastPos = newPos;
+  // 动画时长 = 上报间隔（2000ms），保证下次上报到来前刚好走完
+  animateMarker(driverMarker, fromPos, newPos, routePoints, 2000, (pos) => {
+    updateDriverMapView(pos);
+  });
+}
+
+/**
+ * 更新司机端地图视角（主视角跟随司机）
+ * 接客阶段同时显示乘客 marker 并自适应视野；IN_TRIP 后只跟随司机
+ */
+function updateDriverMapView(pos) {
+  if (!tripMap) return;
+  if (state.tripStatus === 'IN_TRIP') {
+    if (passengerMarker) passengerMarker.hide();
+    tripMap.setCenter([pos.lng, pos.lat]);
+  } else {
+    if (passengerMarker) {
+      tripMap.setFitView([driverMarker, passengerMarker]);
+    } else {
+      tripMap.setCenter([pos.lng, pos.lat]);
+    }
+  }
+}
+
+/**
+ * 贴路 RAF 插值动画（司机端、乘客端共用）
+ *
+ * 在 fromPos → toPos 之间，沿 routePoints 路线做插值，
+ * 每帧调用 marker.setPosition 更新位置，onFrame 回调用于更新视角。
+ *
+ * 贴路逻辑：
+ * 1. 在 routePoints 中找距 fromPos 最近的点作为起始索引
+ * 2. 在 routePoints 中找距 toPos 最近的点作为终止索引
+ * 3. 按时间进度在起止索引之间的路线段上线性插值
+ * 若 routePoints 为 null，直接在 fromPos/toPos 之间线性插值（降级）
+ *
+ * @param {AMap.Marker} marker       要移动的 marker
+ * @param {{lat,lng}} fromPos        动画起点
+ * @param {{lat,lng}} toPos          动画终点
+ * @param {Array|null} routePoints   路线坐标数组 [{lat,lng},...]
+ * @param {number} duration          动画时长（ms），通常等于轮询间隔
+ * @param {Function} onFrame         每帧回调，参数为当前插值坐标 {lat,lng}
+ * @returns {number} RAF id，可用于 cancelAnimationFrame
+ */
+function animateMarker(marker, fromPos, toPos, routePoints, duration, onFrame) {
+  const startTime = performance.now();
+
+  // 构建本次动画的路径段：从 fromPos 最近点到 toPos 最近点的子序列
+  let path;
+  if (routePoints && routePoints.length >= 2) {
+    const fromIdx = nearestIndex(routePoints, fromPos);
+    const toIdx   = nearestIndex(routePoints, toPos);
+    if (fromIdx < toIdx) {
+      // 正向行进：截取 [fromIdx, toIdx] 子段，首尾替换为精确坐标
+      path = [fromPos, ...routePoints.slice(fromIdx + 1, toIdx), toPos];
+    } else {
+      // 起止索引相同或反向（坐标精度问题），直接线性插值
+      path = [fromPos, toPos];
+    }
+  } else {
+    path = [fromPos, toPos];
+  }
+
+  // 预计算路径各段长度，用于按距离比例分配时间
+  const segLengths = [];
+  let totalLen = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const d = haversine(path[i], path[i + 1]);
+    segLengths.push(d);
+    totalLen += d;
+  }
+  // 路径长度为 0（两点重合）时直接结束
+  if (totalLen === 0) {
+    if (marker) marker.setPosition([toPos.lng, toPos.lat]);
+    if (onFrame) onFrame(toPos);
+    return null;
+  }
+
+  function frame(now) {
+    const t = Math.min((now - startTime) / duration, 1); // 0~1 时间进度
+    // 将时间进度映射到路径距离进度
+    const targetDist = t * totalLen;
+    let accumulated = 0;
+    let pos = path[path.length - 1]; // 默认终点
+    for (let i = 0; i < segLengths.length; i++) {
+      if (accumulated + segLengths[i] >= targetDist) {
+        // 在第 i 段内插值
+        const segT = segLengths[i] === 0 ? 0 : (targetDist - accumulated) / segLengths[i];
+        pos = {
+          lat: path[i].lat + (path[i + 1].lat - path[i].lat) * segT,
+          lng: path[i].lng + (path[i + 1].lng - path[i].lng) * segT,
+        };
+        break;
+      }
+      accumulated += segLengths[i];
+    }
+    if (marker) marker.setPosition([pos.lng, pos.lat]);
+    if (onFrame) onFrame(pos);
+    if (t < 1) {
+      driverRafId = requestAnimationFrame(frame);
+    }
+  }
+  driverRafId = requestAnimationFrame(frame);
+  return driverRafId;
+}
+
+/**
+ * 找 routePoints 中距目标点最近的索引
+ * 使用欧氏距离近似（坐标差平方和），无需精确球面距离
+ */
+function nearestIndex(points, target) {
+  let minDist = Infinity, idx = 0;
+  for (let i = 0; i < points.length; i++) {
+    const d = (points[i].lat - target.lat) ** 2 + (points[i].lng - target.lng) ** 2;
+    if (d < minDist) { minDist = d; idx = i; }
+  }
+  return idx;
+}
+
+/**
+ * Haversine 公式计算两点球面距离（米）
+ * 用于路径段长度计算，保证按实际距离比例分配动画时间
+ */
+function haversine(p1, p2) {
+  const R = 6371000;
+  const dLat = (p2.lat - p1.lat) * Math.PI / 180;
+  const dLng = (p2.lng - p1.lng) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(p1.lat * Math.PI / 180) * Math.cos(p2.lat * Math.PI / 180)
+          * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ----------------------------------------------------------------
+// 位置上报（每 2s 上报一次，仅在线时上报）
 //
 // 行为说明：
 // - 等单中（routeSegment=null）：停在路线起点不动，只做心跳
@@ -939,24 +1114,9 @@ function startLocationReport() {
     }
 
     // 更新高德地图上的司机位置 marker
-    // 仅在行程中页（trip-map 容器可见时）才初始化和更新地图，避免在主页浪费资源
+    // 仅在行程中（有 routeSegment）时轮询后端坐标并做贴路插值动画
     if (state.routeSegment) {
-      initTripMap(pos.lat, pos.lng);
-      if (driverMarker) {
-        driverMarker.setPosition([pos.lng, pos.lat]);
-        // IN_TRIP（乘客已上车）后隐藏乘客 marker，地图只跟随司机
-        if (state.tripStatus === 'IN_TRIP') {
-          if (passengerMarker) { passengerMarker.hide(); }
-          tripMap.setCenter([pos.lng, pos.lat]);
-        } else {
-          // 接客阶段：自适应视野，使司机和乘客位置同时可见
-          if (passengerMarker) {
-            tripMap.setFitView([driverMarker, passengerMarker]);
-          } else {
-            tripMap.setCenter([pos.lng, pos.lat]);
-          }
-        }
-      }
+      updateDriverMapFromBackend();
     }
 
     api('/driver/location', 'POST', { lat: pos.lat, lng: pos.lng, timestamp: Date.now(), city: 'default' });
@@ -1057,6 +1217,8 @@ function doLogout() {
             routeKey: null, routeIndex: 0, routeSegment: null, routeArrived: false,
             passengerLat: null, passengerLng: null };
   tripMap = null; driverMarker = null; passengerMarker = null;
+  driverLastPos = null;
+  if (driverRafId) { cancelAnimationFrame(driverRafId); driverRafId = null; }
   showScreen('login');
 }
 

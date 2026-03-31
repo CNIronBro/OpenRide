@@ -430,6 +430,95 @@ let passengerTripMap = null;
 let passengerDriverMarker = null;
 let passengerOriginMarker = null;
 
+// 乘客端地图动画状态
+let passengerDriverLastPos = null; // 上一次已知的司机坐标（插值起点）
+let passengerDriverRafId = null;   // 当前 RAF 动画 id
+
+/**
+ * 乘客端贴路 RAF 插值动画（逻辑与司机端一致）
+ *
+ * 在 fromPos → toPos 之间沿 routePoints 做插值，marker 沿真实道路平滑移动。
+ * 乘客端主视角固定在上车点，不随司机移动，因此无视角更新回调。
+ *
+ * @param {AMap.Marker} marker       司机 marker
+ * @param {{lat,lng}} fromPos        动画起点
+ * @param {{lat,lng}} toPos          动画终点
+ * @param {Array|null} routePoints   路线坐标数组 [{lat,lng},...]
+ * @param {number} duration          动画时长（ms）
+ * @returns {number} RAF id
+ */
+function animateMarkerPassenger(marker, fromPos, toPos, routePoints, duration) {
+  const startTime = performance.now();
+
+  let path;
+  if (routePoints && routePoints.length >= 2) {
+    const fromIdx = passengerNearestIndex(routePoints, fromPos);
+    const toIdx   = passengerNearestIndex(routePoints, toPos);
+    if (fromIdx < toIdx) {
+      path = [fromPos, ...routePoints.slice(fromIdx + 1, toIdx), toPos];
+    } else {
+      path = [fromPos, toPos];
+    }
+  } else {
+    path = [fromPos, toPos];
+  }
+
+  const segLengths = [];
+  let totalLen = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const d = passengerHaversine(path[i], path[i + 1]);
+    segLengths.push(d);
+    totalLen += d;
+  }
+  if (totalLen === 0) {
+    if (marker) marker.setPosition([toPos.lng, toPos.lat]);
+    return null;
+  }
+
+  let rafId;
+  function frame(now) {
+    const t = Math.min((now - startTime) / duration, 1);
+    const targetDist = t * totalLen;
+    let accumulated = 0;
+    let pos = path[path.length - 1];
+    for (let i = 0; i < segLengths.length; i++) {
+      if (accumulated + segLengths[i] >= targetDist) {
+        const segT = segLengths[i] === 0 ? 0 : (targetDist - accumulated) / segLengths[i];
+        pos = {
+          lat: path[i].lat + (path[i + 1].lat - path[i].lat) * segT,
+          lng: path[i].lng + (path[i + 1].lng - path[i].lng) * segT,
+        };
+        break;
+      }
+      accumulated += segLengths[i];
+    }
+    if (marker) marker.setPosition([pos.lng, pos.lat]);
+    if (t < 1) { rafId = requestAnimationFrame(frame); passengerDriverRafId = rafId; }
+  }
+  rafId = requestAnimationFrame(frame);
+  passengerDriverRafId = rafId;
+  return rafId;
+}
+
+function passengerNearestIndex(points, target) {
+  let minDist = Infinity, idx = 0;
+  for (let i = 0; i < points.length; i++) {
+    const d = (points[i].lat - target.lat) ** 2 + (points[i].lng - target.lng) ** 2;
+    if (d < minDist) { minDist = d; idx = i; }
+  }
+  return idx;
+}
+
+function passengerHaversine(p1, p2) {
+  const R = 6371000;
+  const dLat = (p2.lat - p1.lat) * Math.PI / 180;
+  const dLng = (p2.lng - p1.lng) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(p1.lat * Math.PI / 180) * Math.cos(p2.lat * Math.PI / 180)
+          * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 /**
  * 初始化乘客端行程中页的高德地图（仅初始化一次）
  * @param {number} driverLat  司机当前纬度
@@ -590,6 +679,10 @@ function startPolling() {
 
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  // 重置地图动画状态，下次行程重新初始化
+  passengerTripMap = null; passengerDriverMarker = null; passengerOriginMarker = null;
+  passengerDriverLastPos = null;
+  if (passengerDriverRafId) { cancelAnimationFrame(passengerDriverRafId); passengerDriverRafId = null; }
 }
 
 /**
@@ -662,20 +755,31 @@ async function pollTripStatus(orderId) {
   const order = r.data;
   updateTripSteps(order.status);
 
-  // 轮询司机实时位置，更新高德地图上的 marker
+  // 轮询司机实时位置，做贴路 RAF 插值动画
   const locR = await api(`/driver/location/current?orderId=${orderId}`);
   if (locR.code === 200 && locR.data && locR.data.lat && locR.data.lng) {
-    const { lat, lng } = locR.data;
+    const { lat, lng, routePoints } = locR.data;
+    const newPos = { lat, lng };
     // 传入乘客起点坐标，首次初始化时同时显示乘客位置 marker
     initPassengerTripMap(lat, lng, order.originLat, order.originLng);
     if (passengerDriverMarker) {
-      passengerDriverMarker.setPosition([lng, lat]);
-      // 乘客已上车（IN_TRIP）后隐藏起点 marker，地图只跟随司机
-      if (order.status === 'IN_TRIP' || order.status === 'FINISHED') {
-        if (passengerOriginMarker) { passengerOriginMarker.hide(); }
-        passengerTripMap.setCenter([lng, lat]);
+      if (!passengerDriverLastPos) {
+        // 首次：直接定位，不做动画
+        passengerDriverMarker.setPosition([lng, lat]);
+        passengerDriverLastPos = newPos;
       } else {
-        passengerTripMap.setFitView([passengerDriverMarker, passengerOriginMarker]);
+        // 取消上一个未完成的动画，开始新动画
+        if (passengerDriverRafId) { cancelAnimationFrame(passengerDriverRafId); passengerDriverRafId = null; }
+        const fromPos = passengerDriverLastPos;
+        passengerDriverLastPos = newPos;
+        // 动画时长 = 轮询间隔（2000ms）
+        passengerDriverRafId = animateMarkerPassenger(
+          passengerDriverMarker, fromPos, newPos, routePoints || null, 2000
+        );
+      }
+      // 乘客已上车（IN_TRIP）后隐藏起点 marker；乘客端主视角固定在上车点，不跟随司机
+      if (order.status === 'IN_TRIP' || order.status === 'FINISHED') {
+        if (passengerOriginMarker) passengerOriginMarker.hide();
       }
     }
   }

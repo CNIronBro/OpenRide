@@ -76,12 +76,15 @@ public class OrderController {
      * 司机身份通过 session userId → driver.id 解析。
      */
     @PostMapping("/{id}/accept")
-    public Result<Order> accept(@PathVariable Long id, HttpSession session) {
+    public Result<Order> accept(@PathVariable Long id,
+                                @RequestBody(required = false) Map<String, String> body,
+                                HttpSession session) {
         Long userId = SessionUtils.getUserId(session);
         if (userId == null) throw new BizException(401, "请先登录");
         // 通过 userId 查出 driver.id（接单操作使用 driver.id 而非 user_id）
         Long driverId = driverService.getDriverByUserId(userId).getId();
-        return Result.ok(orderService.acceptOrder(id, driverId));
+        String routeKey = (body != null) ? body.get("routeKey") : null;
+        return Result.ok(orderService.acceptOrder(id, driverId, routeKey));
     }
 
     /** 司机到达接客点（ACCEPTED → PICKING） */
