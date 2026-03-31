@@ -1080,7 +1080,7 @@ function doLogout() {
             countdownTimer: null, locationTimer: null,
             routeKey: null, distanceCursor: 0, routePoints: {}, routeSegment: null, routeArrived: false,
             passengerLat: null, passengerLng: null };
-  tripMap = null; driverMarker = null; passengerMarker = null; mapUserInteracted = false;
+  tripMap = null; driverMarker = null; passengerMarker = null;
   driverLastPos = null;
   if (driverRafId) { cancelAnimationFrame(driverRafId); driverRafId = null; }
   showScreen('login');

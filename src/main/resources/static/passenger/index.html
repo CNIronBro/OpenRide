@@ -31,7 +31,6 @@
   .map-area { background: linear-gradient(135deg, #e8f4fd, #d0e8f7); height: 260px; position: relative; display: flex; align-items: center; justify-content: center; }
   .map-placeholder { text-align: center; color: #666; }
   .map-placeholder .icon { font-size: 48px; }
-  /*.nearby-count { position: absolute; top: 12px; right: 12px; background: rgba(255,107,0,0.9); color: #fff; border-radius: 12px; padding: 4px 10px; font-size: 12px; }*/
   .driver-dot { position: absolute; width: 12px; height: 12px; background: #ff6b00; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
   .order-panel { padding: 20px; flex: 1; }
   .order-panel h3 { font-size: 16px; color: #333; margin-bottom: 16px; }
@@ -599,20 +598,6 @@ async function doLogin() {
   }
 }
 
-// ---- 附近司机数量 ----
-// async function loadNearbyCount() {
-//   // 使用路线A起点作为默认查询坐标（乘客上车点）
-//   const lat = selectedRoute ? selectedRoute.originLat : 39.9268;
-//   const lng = selectedRoute ? selectedRoute.originLng : 116.4392;
-//   const r = await api(`/dispatch/nearby?lat=${lat}&lng=${lng}&radius=5&city=default`);
-//   const el = document.getElementById('nearby-count');
-//   if (r.code === 200) {
-//     el.textContent = `附近 ${r.data.length} 位司机`;
-//   } else {
-//     el.textContent = '附近司机查询失败';
-//   }
-// }
-
 // ---- 预估价格 ----
 async function estimatePrice() {
   if (!selectedRoute) { alert('请先选择路线'); return; }
@@ -938,7 +923,6 @@ async function showPaymentScreen(order) {
  */
 function doPay() {
   const method = document.querySelector('input[name=payMethod]:checked')?.value || 'wechat';
-  const methodName = { wechat: '微信支付', alipay: '支付宝', cash: '现金支付' }[method];
   // mock 支付成功，跳转评价页
   showReviewScreen();
 }
@@ -995,7 +979,6 @@ api('/passenger/profile').then(r => {
   if (r.code === 200) {
     currentUserId = r.data.id;
     showScreen('home');
-    // loadNearbyCount();
   }
 }).catch(() => {});
 
