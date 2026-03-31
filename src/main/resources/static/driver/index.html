@@ -353,6 +353,8 @@ let state = {
   routePoints: {},         // 路线规划结果缓存：{ toPickup: [{lat,lng},...], toDestination: [...] }
   passengerLat: null,      // 乘客上车点纬度（接单时从订单获取，用于地图显示）
   passengerLng: null,      // 乘客上车点经度
+  destLat: null,           // 目的地纬度（IN_TRIP 阶段地图显示）
+  destLng: null,           // 目的地经度
 };
 
 // ----------------------------------------------------------------
@@ -602,9 +604,21 @@ async function tripAction() {
     // 需要先查询订单获取目的地坐标
     api('/order/' + state.currentOrderId + '/driver-view', 'GET').then(orderRes => {
       if (orderRes.ok) {
+        const destLat = parseFloat(orderRes.data.destLat);
+        const destLng = parseFloat(orderRes.data.destLng);
+        state.destLat = destLat;
+        state.destLng = destLng;
+        // 在地图上标注目的地
+        if (tripMap) {
+          new AMap.Marker({
+            map: tripMap,
+            position: [destLng, destLat],
+            label: { content: '目的地', offset: new AMap.Pixel(0, -30) }
+          });
+        }
         fetchAndCacheRoute('toDestination',
             state.passengerLat, state.passengerLng,
-            parseFloat(orderRes.data.destLat), parseFloat(orderRes.data.destLng),
+            destLat, destLng,
             state.currentOrderId);
       }
     });
@@ -623,6 +637,8 @@ async function tripAction() {
     state.routePoints = {};
     state.passengerLat = null;
     state.passengerLng = null;
+    state.destLat = null;
+    state.destLng = null;
     // 重置地图，下次行程重新初始化
     tripMap = null; driverMarker = null; passengerMarker = null;
     driverLastPos = null;
