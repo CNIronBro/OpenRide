@@ -226,6 +226,33 @@ public class DriverLocationService {
     }
 
     /**
+     * 缓存路线规划结果到 Redis
+     *
+     * 由司机端前端在接单/开始行程时调用高德路线规划 API 后，将路线点 JSON 推送到后端缓存。
+     * 乘客端 /driver/location/current 接口从此处读取 routePoints，用于贴路动画。
+     *
+     * @param orderId    订单 ID（路线以订单为粒度缓存，避免同一司机多订单互相覆盖）
+     * @param segment    路线段标识："toPickup" 或 "toDestination"
+     * @param pointsJson 路线点 JSON 字符串，格式 [{lat,lng},...]
+     */
+    public void cacheRoute(Long orderId, String segment, String pointsJson) {
+        // TTL 2h，覆盖任何合理的行程时长
+        redisTemplate.opsForValue().set(
+                "route:" + segment + ":" + orderId, pointsJson, Duration.ofHours(2));
+    }
+
+    /**
+     * 读取缓存的路线规划结果
+     *
+     * @param orderId 订单 ID
+     * @param segment "toPickup" 或 "toDestination"
+     * @return 路线点 JSON 字符串，若未缓存返回 null
+     */
+    public String getRoute(Long orderId, String segment) {
+        return redisTemplate.opsForValue().get("route:" + segment + ":" + orderId);
+    }
+
+    /**
      * 查询司机当前最新可信坐标（用于乘客端地图实时展示）
      *
      * 读取 trusted 坐标，避免漂移点导致乘客端地图跳变。

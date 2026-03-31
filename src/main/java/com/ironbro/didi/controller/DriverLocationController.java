@@ -1,8 +1,9 @@
 package com.ironbro.didi.controller;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ironbro.didi.common.BizException;
 import com.ironbro.didi.common.Result;
-import com.ironbro.didi.common.RouteConstants;
 import com.ironbro.didi.common.SessionUtils;
 import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.enums.OrderStatus;
@@ -13,7 +14,6 @@ import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +28,7 @@ public class DriverLocationController {
     private final DriverLocationService locationService;
     private final DriverService driverService;
     private final OrderMapper orderMapper;
+    private final ObjectMapper objectMapper;
 
     /**
      * 4.1 司机上报位置
@@ -54,10 +55,36 @@ public class DriverLocationController {
     }
 
     /**
+     * 缓存路线规划结果
+     *
+     * 司机端前端在接单/开始行程时调用高德路线规划 API，拿到路线点后推送到此接口缓存。
+     * 乘客端 /driver/location/current 接口从 Redis 读取这些路线点，用于贴路动画。
+     *
+     * 请求体：{ "orderId": 123, "segment": "toPickup", "points": [{lat,lng},...] }
+     */
+    @PostMapping("/route/cache")
+    public Result<Void> cacheRoute(@RequestBody Map<String, Object> body, HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "未登录");
+
+        Long orderId = ((Number) body.get("orderId")).longValue();
+        String segment = (String) body.get("segment");
+
+        try {
+            // 将 points 列表序列化为 JSON 字符串存入 Redis
+            String pointsJson = objectMapper.writeValueAsString(body.get("points"));
+            locationService.cacheRoute(orderId, segment, pointsJson);
+        } catch (Exception e) {
+            throw new BizException(500, "路线缓存失败");
+        }
+        return Result.ok();
+    }
+
+    /**
      * 乘客端查询当前司机实时位置（用于行程中页地图展示）
      *
-     * 通过 orderId 找到对应司机，再从 Redis driver:location:pos:{driverId} 读取最新坐标。
-     * 同时根据订单的 routeKey 和当前状态返回对应路线段坐标序列（routePoints），
+     * 通过 orderId 找到对应司机，再从 Redis driver:location:trusted:{driverId} 读取最新坐标。
+     * 同时从 Redis route:{segment}:{orderId} 读取路线规划结果（由司机端接单时缓存），
      * 供前端在两个离散坐标之间做贴路 RAF 插值动画，避免司机 marker 直线穿越建筑。
      *
      * @param orderId 订单 ID（乘客只能查自己的订单）
@@ -78,21 +105,23 @@ public class DriverLocationController {
         double[] pos = locationService.getDriverPosition(order.getDriverId());
         if (pos == null) return Result.ok(null);
 
-        // 根据订单状态决定返回哪段路线：接客阶段返回 toPickup，行程中返回 toDestination
-        boolean toPickup = order.getStatus() != OrderStatus.IN_TRIP;
-        double[][] segment = RouteConstants.getSegment(order.getRouteKey(), toPickup);
+        // 根据订单状态决定读取哪段路线：接客阶段读 toPickup，行程中读 toDestination
+        String segment = order.getStatus() != OrderStatus.IN_TRIP ? "toPickup" : "toDestination";
+        String routeJson = locationService.getRoute(orderId, segment);
 
         Map<String, Object> result = new HashMap<>();
         result.put("lat", pos[0]);
         result.put("lng", pos[1]);
 
-        if (segment != null) {
-            // 将 double[][] 转为 [{lat,lng},...] 格式，便于前端直接使用
-            List<Map<String, Double>> points = new ArrayList<>(segment.length);
-            for (double[] p : segment) {
-                points.add(Map.of("lat", p[0], "lng", p[1]));
+        if (routeJson != null) {
+            try {
+                // 将 JSON 字符串反序列化为 List<Map>，直接返回给前端
+                List<Map<String, Double>> points = objectMapper.readValue(
+                        routeJson, new TypeReference<List<Map<String, Double>>>() {});
+                result.put("routePoints", points);
+            } catch (Exception e) {
+                result.put("routePoints", null);
             }
-            result.put("routePoints", points);
         } else {
             result.put("routePoints", null);
         }
