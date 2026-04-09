@@ -93,7 +93,9 @@
   .trip-header { background: #ff6b00; padding: 16px; color: #fff; }
   .trip-title { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
   .trip-subtitle { font-size: 13px; opacity: 0.85; }
-  #trip-map { height: 200px; width: 100%; }
+  #trip-map { height: 200px; width: 100%; position: relative; }
+  .map-focus-btns { position: absolute; top: 8px; right: 8px; z-index: 100; display: flex; gap: 6px; }
+  .map-focus-btn { background: #fff; border: none; border-radius: 6px; padding: 6px 10px; font-size: 12px; color: #ff6b00; box-shadow: 0 2px 6px rgba(0,0,0,0.18); cursor: pointer; white-space: nowrap; }
   .trip-body { padding: 16px; flex: 1; }
   .passenger-card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px; }
   .passenger-avatar { width: 44px; height: 44px; background: #f0f0f0; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; }
@@ -253,7 +255,12 @@
     <div class="trip-title" id="tripTitle">前往接客点</div>
     <div class="trip-subtitle" id="tripSubtitle">请尽快前往乘客位置</div>
   </div>
-  <div id="trip-map"></div>
+  <div style="position:relative">
+    <div id="trip-map"></div>
+    <div class="map-focus-btns">
+      <button class="map-focus-btn" id="focusToggleBtn" onclick="focusToggle()">👤 乘客</button>
+    </div>
+  </div>
   <div class="trip-body">
     <div class="passenger-card">
       <div class="passenger-avatar">👤</div>
@@ -701,9 +708,46 @@ async function updateDriverMapFromBackend() {
 }
 
 function updateDriverMapView(pos) {
-  // 视角完全交由用户控制，仅在 IN_TRIP 阶段隐藏乘客 marker
+  // 视角完全交由用户控制，仅在 IN_TRIP 阶段隐藏乘客 marker 并切换聚焦目标为目的地
   if (!tripMap) return;
-  if (state.tripStatus === 'IN_TRIP' && passengerMarker) passengerMarker.hide();
+  if (state.tripStatus === 'IN_TRIP') {
+    if (passengerMarker) passengerMarker.hide();
+    // 乘客已上车，聚焦目标切换为目的地
+    const btn = document.getElementById('focusToggleBtn');
+    if (btn && btn.dataset.target !== 'dest') {
+      btn.dataset.target = 'dest';
+      btn.textContent = '🏁 目的地';
+    }
+  }
+}
+
+// 当前聚焦目标是否为司机（false = 聚焦另一方：乘客或目的地）
+let driverFocusOnDriver = false;
+
+/**
+ * 单按钮切换聚焦：
+ * - ACCEPTED/PICKING 阶段：在司机 ↔ 乘客位置之间切换
+ * - IN_TRIP 阶段：在司机 ↔ 目的地之间切换
+ */
+function focusToggle() {
+  if (!tripMap) return;
+  const btn = document.getElementById('focusToggleBtn');
+  driverFocusOnDriver = !driverFocusOnDriver;
+
+  if (driverFocusOnDriver) {
+    // 聚焦司机
+    if (driverLastPos) tripMap.setZoomAndCenter(16, [driverLastPos.lng, driverLastPos.lat]);
+    const isInTrip = state.tripStatus === 'IN_TRIP';
+    btn.textContent = isInTrip ? '🏁 目的地' : '👤 乘客';
+  } else {
+    // 聚焦另一方（乘客或目的地）
+    if (state.tripStatus === 'IN_TRIP') {
+      if (state.destLat && state.destLng) tripMap.setZoomAndCenter(16, [state.destLng, state.destLat]);
+    } else {
+      if (state.passengerLat && state.passengerLng) tripMap.setZoomAndCenter(16, [state.passengerLng, state.passengerLat]);
+    }
+    btn.textContent = '📍 司机';
+  }
 }
 
 /**

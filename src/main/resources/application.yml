@@ -4,6 +4,12 @@ spring:
   profiles:
     include: keys
 
+  session:
+    servlet:
+      cookie:
+        # 自定义 cookie 名称，避免与其他应用冲突
+        name: DIDI_SESSION
+
   datasource:
     url: jdbc:mysql://localhost:3309/didi?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
     username: root
