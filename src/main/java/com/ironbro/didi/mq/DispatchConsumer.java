@@ -194,7 +194,7 @@ public class DispatchConsumer {
             // 附近暂无在线司机，不立即取消，发延迟消息等待司机上线
             // waitedSeconds=0 表示本次是第一次无司机，RetryConsumer 收到后会重新 GEO 召回
             log.info("附近无在线司机，等待重试 orderId={}", orderId);
-            sendNoDriverDelayMessage(orderId, 0);
+            sendNoDriverDelayMessage(orderId, 0, DISPATCH_RADIUS_KM);
             return;
         }
 
@@ -208,7 +208,7 @@ public class DispatchConsumer {
         if (drivers.isEmpty()) {
             // GEO 召回有结果但 DB 查询后均不可用（状态变更竞态），同样等待重试
             log.info("候选司机均不可用，等待重试 orderId={}", orderId);
-            sendNoDriverDelayMessage(orderId, 0);
+            sendNoDriverDelayMessage(orderId, 0, DISPATCH_RADIUS_KM);
             return;
         }
 
@@ -364,16 +364,20 @@ public class DispatchConsumer {
     /**
      * 无司机时发延迟消息，等待 15s 后由 RetryConsumer 重新 GEO 召回
      *
-     * @param orderId      订单 ID
-     * @param waitedSeconds 已等待秒数（每轮 +15）
+     * currentRadiusKm 携带本轮使用的搜索半径，RetryConsumer 收到后据此决定下一轮扩圈半径。
+     * 初始调用时传入 DISPATCH_RADIUS_KM（5.0km），作为扩圈起点。
+     *
+     * @param orderId        订单 ID
+     * @param waitedSeconds  已等待秒数（每轮 +15）
+     * @param currentRadiusKm 本轮搜索半径（公里）
      */
-    // QUESTION
-    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
+    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds, double currentRadiusKm) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);
         msg.put("dispatchIndex", -1);       // 无司机重试不使用 dispatchIndex，填 -1 占位
         msg.put("noDriverRetry", true);
         msg.put("waitedSeconds", waitedSeconds);
+        msg.put("currentRadiusKm", currentRadiusKm);  // 本轮搜索半径，用于下一轮扩圈决策
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,

@@ -28,7 +28,9 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * 派单超时重试消费者
@@ -72,8 +74,18 @@ public class RetryConsumer {
     /** 无司机时最大等待时间（秒），超过后才真正取消订单 */
     private static final int MAX_NO_DRIVER_WAIT_SECONDS = 60;
 
-    /** GEO 召回半径（与 DispatchConsumer 保持一致） */
-    private static final double DISPATCH_RADIUS_KM = 5.0;
+    /**
+     * 动态扩圈半径步进表（公里）
+     *
+     * 无司机重试时，每轮按此表依次扩大搜索半径，避免在低密度区域（郊区、深夜）
+     * 因固定半径找不到司机而直接取消订单。
+     * 步进设计原则：前几档小步快跑（5→8→12），最后一档拉到合理上限（15km）。
+     * 超过 15km 的派单在实际场景中司机接单意愿极低，继续扩圈意义不大。
+     */
+    private static final double[] RADIUS_STEPS = {5.0, 8.0, 12.0, 15.0};
+
+    /** 搜索半径上限（公里），超过此值不再扩大 */
+    private static final double MAX_RADIUS_KM = 15.0;
 
     /** 最多召回候选司机数量（与 DispatchConsumer 保持一致） */
     private static final int MAX_CANDIDATES = 10;
@@ -231,13 +243,22 @@ public class RetryConsumer {
     /**
      * 无司机等待重试处理
      *
-     * 每 15s 重新 GEO 召回一次，累计等待超过 MAX_NO_DRIVER_WAIT_SECONDS（60s）才取消订单。
-     * 若召回到司机，立即走正常派单流程（存候选列表、推送、发普通延迟消息）。
+     * 每 15s 重新 GEO 召回一次，并按步进表逐步扩大搜索半径：
+     * 5km → 8km → 12km → 15km，累计等待超过 MAX_NO_DRIVER_WAIT_SECONDS（60s）才取消订单。
+     *
+     * 扩圈设计原因：
+     * 固定半径在郊区/深夜等低密度场景下会反复找不到司机，最终直接取消，体验差。
+     * 动态扩圈让系统在等待过程中逐步覆盖更大范围，提升接单成功率。
+     *
+     * 当前搜索半径通过消息体中的 currentRadiusKm 字段传递（消息自包含，无需额外 Redis 存储）。
+     *
+     * 已派过司机过滤：
+     * 扩圈后，之前在小半径内被推送但未接单的司机可能再次出现在搜索结果中。
+     * 通过过滤 order:dispatched:drivers:{orderId} Set，避免对同一司机重复推送同一订单。
      *
      * @param orderId 订单 ID
-     * @param body    消息体，含 waitedSeconds、originLat、originLng、city 等字段
+     * @param body    消息体，含 waitedSeconds、currentRadiusKm 等字段
      */
-    // QUESTION
     private void handleNoDriverRetry(Long orderId, Map<String, Object> body) {
         // 订单状态校验，防止订单已被取消或接单
         Order order = orderMapper.selectById(orderId);
@@ -256,49 +277,72 @@ public class RetryConsumer {
             return;
         }
 
+        // 读取上一轮使用的搜索半径，计算本轮扩圈后的半径
+        // currentRadiusKm 由上一条消息携带，必须存在
+        double currentRadius = ((Number) body.get("currentRadiusKm")).doubleValue();
+        double searchRadius = nextRadius(currentRadius);
+
         // 重新 GEO 召回，坐标从订单实体读取（无需消息体携带）
         double originLat = order.getOriginLat().doubleValue();
         double originLng = order.getOriginLng().doubleValue();
         String city = "default";
 
         List<Long> nearbyDriverIds = locationService.nearbyDrivers(
-                originLat, originLng, DISPATCH_RADIUS_KM, city, MAX_CANDIDATES);
+                originLat, originLng, searchRadius, city, MAX_CANDIDATES);
 
         int nextWaited = waitedSeconds + 15;
 
         if (nearbyDriverIds.isEmpty()) {
-            // 仍无司机，继续等待
-            log.info("无司机重试：仍无司机，继续等待 orderId={} waitedSeconds={}", orderId, nextWaited);
-            sendNoDriverDelayMessage(orderId, nextWaited);
+            // 扩圈后仍无司机，继续等待，下一条消息携带本轮使用的半径
+            log.info("无司机重试：radius={}km 仍无司机，继续等待 orderId={} waitedSeconds={}",
+                    searchRadius, orderId, nextWaited);
+            sendNoDriverDelayMessage(orderId, nextWaited, searchRadius);
             return;
         }
 
-        // 有司机了，走正常派单流程：存候选列表、推送第一位、发普通延迟消息
-        log.info("无司机重试：发现司机，开始正常派单 orderId={} waitedSeconds={}", orderId, nextWaited);
+        // 过滤已经派过的司机，避免扩圈后对同一司机重复推送
+        // order:dispatched:drivers:{orderId} 记录了本订单所有已推送过的司机 ID
+        String dispatchedKey = "order:dispatched:drivers:" + orderId;
+        Set<String> alreadyDispatched = redisTemplate.opsForSet().members(dispatchedKey);
+        List<Long> filteredIds = nearbyDriverIds.stream()
+                .filter(id -> alreadyDispatched == null || !alreadyDispatched.contains(String.valueOf(id)))
+                .collect(Collectors.toList());
+
+        if (filteredIds.isEmpty()) {
+            // 搜索范围内的司机均已被推送过且未接单，继续等待扩圈
+            log.info("无司机重试：radius={}km 内司机均已派过，继续等待 orderId={} waitedSeconds={}",
+                    searchRadius, orderId, nextWaited);
+            sendNoDriverDelayMessage(orderId, nextWaited, searchRadius);
+            return;
+        }
+
+        // 有新的可用司机，走正常派单流程：存候选列表、推送第一位、发普通延迟消息
+        log.info("无司机重试：radius={}km 发现新司机，开始正常派单 orderId={} waitedSeconds={}",
+                searchRadius, orderId, nextWaited);
 
         String candidatesKey = "order:candidates:" + orderId;
         String indexKey = "order:dispatch:index:" + orderId;
 
         String candidatesJson;
         try {
-            candidatesJson = objectMapper.writeValueAsString(nearbyDriverIds);
+            candidatesJson = objectMapper.writeValueAsString(filteredIds);
         } catch (Exception e) {
             log.error("候选列表序列化失败 orderId={}", orderId, e);
             sendCancelMessage(orderId, "派单异常");
             return;
         }
 
-        // 候选司机列表
+        // 候选司机列表（已过滤重复推送）
         redisTemplate.opsForValue().set(candidatesKey, candidatesJson, Duration.ofMinutes(10));
         // 当前派到了第几个司机
         redisTemplate.opsForValue().set(indexKey, "0", Duration.ofMinutes(10));
 
-        Long targetDriverId = nearbyDriverIds.get(0);
+        Long targetDriverId = filteredIds.get(0);
         pushOrderToDriver(orderId, targetDriverId);
         updateDriverDispatchStats(targetDriverId);
         saveDispatchLog(orderId, targetDriverId, DispatchAction.DISPATCHED,
-                "无司机等待后找到司机，开始派单 waitedSeconds=" + nextWaited);
-        // 超时兜底，此时没有设置noDriverRetry=true，所以不会进入之前找不到司机重试的路径
+                "无司机等待后找到司机，radius=" + searchRadius + "km, waitedSeconds=" + nextWaited);
+        // 超时兜底，此时没有设置 noDriverRetry=true，所以不会进入无司机重试路径
         sendDelayMessage(orderId, 0);
     }
 
@@ -358,14 +402,15 @@ public class RetryConsumer {
      * 发送无司机等待延迟消息
      *
      * 通过 x-delay header 实现 15s 延迟，15s 后由 RetryConsumer 重新 GEO 召回。
+     * currentRadiusKm 携带本轮使用的搜索半径，供下一轮消费时决定是否继续扩圈。
      */
-    // QUESTION
-    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds) {
+    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds, double currentRadiusKm) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);
         msg.put("dispatchIndex", -1);   // 无司机重试不使用 dispatchIndex，填 -1 占位
         msg.put("noDriverRetry", true);
         msg.put("waitedSeconds", waitedSeconds);
+        msg.put("currentRadiusKm", currentRadiusKm);  // 本轮搜索半径，用于下一轮扩圈决策
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,
@@ -398,5 +443,18 @@ public class RetryConsumer {
         log.setRemark(remark);
         log.setCreatedAt(LocalDateTime.now());
         dispatchLogMapper.insert(log);
+    }
+
+    /**
+     * 根据当前半径返回下一档扩圈半径
+     *
+     * 按 RADIUS_STEPS 步进表依次扩大，若已达最大档则返回 MAX_RADIUS_KM 不再扩大。
+     * +0.01 容差用于规避浮点比较误差（如 5.0000000001 > 5.0 的情况）。
+     */
+    private double nextRadius(double currentRadius) {
+        for (double step : RADIUS_STEPS) {
+            if (step > currentRadius + 0.01) return step;
+        }
+        return MAX_RADIUS_KM;
     }
 }

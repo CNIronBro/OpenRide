@@ -212,6 +212,14 @@
       <div class="route-option-name">路线 C：天安门出发</div>
       <div class="route-option-desc">天安门 → 接客：王府井 → 目的地：朝阳公园</div>
     </div>
+    <div class="route-option" id="routeOpt_D" onclick="selectRoute('D')">
+      <div class="route-option-name">路线 D：雍和宫出发（短程测试）</div>
+      <div class="route-option-desc">雍和宫 → 接客：国子监 → 目的地：安定门（全程约 2 分钟）</div>
+    </div>
+    <div class="route-option" id="routeOpt_E" onclick="selectRoute('E')">
+      <div class="route-option-name">路线 E：管庄出发（扩圈测试）</div>
+      <div class="route-option-desc">距三里屯约 10km，配合乘客路线A测试扩圈逻辑</div>
+    </div>
     <button class="btn btn-secondary" style="margin-top:8px" onclick="closeRouteSelect()">取消</button>
   </div>
 </div>
@@ -337,6 +345,11 @@ const ROUTE_STARTS = {
   A: { lat: 39.9087, lng: 116.4633, label: '路线A：国贸出发' },  // 国贸桥
   B: { lat: 39.9826, lng: 116.3105, label: '路线B：中关村出发' }, // 中关村广场
   C: { lat: 39.9055, lng: 116.3976, label: '路线C：天安门出发' }, // 天安门广场
+  // 路线D：短程测试路线，司机起点距接客点约 615m，全程约 2 分钟
+  D: { lat: 39.9450, lng: 116.4100, label: '路线D：雍和宫出发（短程测试）' }, // 雍和宫方向
+  // 路线E：扩圈测试专用，起点距乘客路线A起点（三里屯）约 10km
+  // 初始 5km 搜索找不到，第一轮扩圈 8km 仍找不到，第二轮扩圈 12km 可召回
+  E: { lat: 39.9270, lng: 116.5570, label: '路线E：管庄出发（扩圈测试）' }, // 朝阳区东部，距三里屯约 10km
 };
 
 // ----------------------------------------------------------------

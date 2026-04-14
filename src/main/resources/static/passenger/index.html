@@ -191,6 +191,7 @@
           <option value="A">路线A：三里屯 → 望京</option>
           <option value="B">路线B：北京大学南门 → 颐和园</option>
           <option value="C">路线C：王府井 → 朝阳公园</option>
+          <option value="D">路线D：国子监 → 安定门（短程测试）</option>
         </select>
       </div>
       <div class="loc-row">
@@ -420,6 +421,13 @@ const PASSENGER_ROUTES = {
     originLat: 39.9158, originLng: 116.4188,
     destAddr: '朝阳公园',
     destLat: 39.9352, destLng: 116.4692
+  },
+  // 路线D：短程测试路线，每段约 615m，全程约 2 分钟（配合司机路线D使用）
+  D: {
+    originAddr: '国子监',
+    originLat: 39.9410, originLng: 116.4150,
+    destAddr: '安定门',
+    destLat: 39.9370, destLng: 116.4200
   }
 };
 
