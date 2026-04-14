@@ -26,25 +26,89 @@
   .hint { font-size: 12px; color: #999; margin-top: 8px; }
   .err-msg { color: #e91e63; font-size: 13px; margin-top: 8px; min-height: 18px; }
 
-  /* 主页 */
-  #home { background: #fff; }
-  .map-area { background: linear-gradient(135deg, #e8f4fd, #d0e8f7); height: 260px; position: relative; display: flex; align-items: center; justify-content: center; }
-  .map-placeholder { text-align: center; color: #666; }
-  .map-placeholder .icon { font-size: 48px; }
-  .driver-dot { position: absolute; width: 12px; height: 12px; background: #ff6b00; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }
-  .order-panel { padding: 20px; flex: 1; }
-  .order-panel h3 { font-size: 16px; color: #333; margin-bottom: 16px; }
-  .location-input { border: 1px solid #eee; border-radius: 12px; overflow: hidden; margin-bottom: 16px; }
+  /* 主页：地图铺满，面板作为底部抽屉浮在地图上 */
+  #home { background: #fff; position: relative; height: 100vh; overflow: hidden; display: none; }
+  #home.active { display: block; }
+  /* 主地图：铺满整个主页 */
+  #home-map { position: absolute; inset: 0; width: 100%; height: 100%; }
+  /* tab-bar 固定在底部，z-index 高于面板 */
+  #home .tab-bar { position: absolute; bottom: 0; left: 0; right: 0; z-index: 30; background: #fff; border-top: 1px solid #eee; }
+
+  /* 底部抽屉面板 */
+  .order-sheet {
+    position: absolute; left: 0; right: 0; bottom: 56px; /* 56px = tab-bar 高度 */
+    background: #fff;
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.12);
+    z-index: 20;
+    /* 初始高度由 JS 控制，通过 transform 实现拖动 */
+    transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);
+    /* 面板内容可滚动，但拖动把手区域不滚动 */
+    max-height: calc(100vh - 56px - 80px); /* 留出地图最小可见高度 80px */
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  /* 拖动把手 */
+  .sheet-handle {
+    width: 40px; height: 4px; background: #ddd; border-radius: 2px;
+    margin: 12px auto 0; flex-shrink: 0; cursor: grab;
+  }
+  /* 面板内容区（可滚动） */
+  .sheet-body { padding: 12px 20px 16px; overflow-y: auto; flex: 1; }
+  .sheet-body h3 { font-size: 16px; color: #333; margin-bottom: 14px; }
+
+  /* 路线选择卡片 */
+  .location-input { border: 1px solid #eee; border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
   .loc-row { display: flex; align-items: center; padding: 12px 16px; gap: 12px; }
-  .loc-row:first-child { border-bottom: 1px solid #f0f0f0; }
+  .loc-row:not(:last-child) { border-bottom: 1px solid #f0f0f0; }
   .loc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
   .loc-dot.start { background: #4caf50; }
   .loc-dot.end { background: #ff6b00; }
-  .loc-row input { border: none; outline: none; flex: 1; font-size: 15px; }
   .loc-row select { border: none; outline: none; flex: 1; font-size: 15px; background: transparent; cursor: pointer; }
-  .price-estimate { background: #fff8f0; border: 1px solid #ffe0b2; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+  /* 起点/终点地址文字展示（自定义确认后替换下拉框） */
+  .loc-addr-text { flex: 1; font-size: 15px; color: #333; }
+  .loc-addr-text.placeholder { color: #999; }
+
+  .price-estimate { background: #fff8f0; border: 1px solid #ffe0b2; border-radius: 8px; padding: 12px 16px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
   .price-estimate .price { font-size: 22px; font-weight: bold; color: #ff6b00; }
   .price-estimate .detail { font-size: 12px; color: #999; text-align: right; }
+
+  /* 准星选点覆盖层（自定义模式，铺满地图） */
+  .crosshair-overlay {
+    display: none;
+    position: absolute; inset: 0; z-index: 25;
+    pointer-events: none; /* 让地图事件穿透，准星只是视觉层 */
+  }
+  .crosshair-overlay.show { display: block; }
+  /* 准星图标，固定在屏幕正中央 */
+  .crosshair-pin {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -100%); /* 针尖对准中心点 */
+    font-size: 36px;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+    pointer-events: none;
+  }
+  /* 顶部地址提示浮层 */
+  .crosshair-tip {
+    position: absolute; top: 16px; left: 16px; right: 16px;
+    background: #fff;
+    border-radius: 12px;
+    padding: 12px 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+    pointer-events: auto; /* 允许点击 */
+    z-index: 26;
+  }
+  .crosshair-tip-step { font-size: 12px; color: #ff6b00; font-weight: bold; margin-bottom: 4px; }
+  .crosshair-tip-addr { font-size: 14px; color: #333; min-height: 20px; }
+  /* 底部确认按钮浮层 */
+  .crosshair-confirm {
+    position: absolute; left: 16px; right: 16px;
+    bottom: calc(56px + 16px); /* tab-bar 高度 + 间距 */
+    pointer-events: auto;
+    z-index: 26;
+  }
+  .crosshair-confirm .btn { box-shadow: 0 4px 16px rgba(255,107,0,0.4); }
 
   /* 历史行程 */
   #history { background: #f5f5f5; }
@@ -171,44 +235,64 @@
 
 <!-- ===== 主页 - 叫车 ===== -->
 <div id="home" class="screen">
-  <div class="map-area">
-    <div class="map-placeholder">
-      <div class="icon">🗺️</div>
-      <div style="font-size:14px;margin-top:8px">地图（mock）</div>
+  <!-- 真实高德地图，铺满整个主页 -->
+  <div id="home-map"></div>
+
+  <!-- 准星选点覆盖层（自定义模式时显示） -->
+  <div class="crosshair-overlay" id="crosshairOverlay">
+    <!-- 顶部地址提示 -->
+    <div class="crosshair-tip">
+      <div class="crosshair-tip-step" id="crosshairStep">正在选择起点</div>
+      <div class="crosshair-tip-addr" id="crosshairAddr">移动地图，将准星对准目标位置</div>
     </div>
-<!--    <div class="nearby-count" id="nearby-count">附近司机加载中...</div>-->
-    <div class="driver-dot" style="top:30%;left:40%"></div>
-    <div class="driver-dot" style="top:55%;left:65%"></div>
-    <div class="driver-dot" style="top:70%;left:30%"></div>
+    <!-- 准星图标，固定在屏幕中央 -->
+    <div class="crosshair-pin" id="crosshairPin">📍</div>
+    <!-- 底部确认按钮 -->
+    <div class="crosshair-confirm">
+      <button class="btn btn-primary" id="crosshairConfirmBtn" onclick="confirmCrosshairPos()">确认起点</button>
+      <button class="btn btn-secondary" onclick="cancelCrosshair()" style="margin-top:8px">取消</button>
+    </div>
   </div>
-  <div class="order-panel">
-    <h3 id="home-greeting">你好 👋 去哪儿？</h3>
-    <div class="location-input">
-      <div class="loc-row">
-        <div class="loc-dot start"></div>
-        <select id="route-select" onchange="onRouteSelect()">
-          <option value="">-- 请选择路线 --</option>
-          <option value="A">路线A：三里屯 → 望京</option>
-          <option value="B">路线B：北京大学南门 → 颐和园</option>
-          <option value="C">路线C：王府井 → 朝阳公园</option>
-          <option value="D">路线D：国子监 → 安定门（短程测试）</option>
-        </select>
+
+  <!-- 底部抽屉面板 -->
+  <div class="order-sheet" id="orderSheet">
+    <div class="sheet-handle" id="sheetHandle"></div>
+    <div class="sheet-body">
+      <h3 id="home-greeting">你好 👋 去哪儿？</h3>
+      <div class="location-input">
+        <!-- 起点行：预设路线时显示下拉框，自定义确认后显示地址文字 -->
+        <div class="loc-row" id="originRow">
+          <div class="loc-dot start"></div>
+          <select id="route-select" onchange="onRouteSelect()">
+            <option value="">-- 请选择路线 --</option>
+            <option value="A">路线A：三里屯 → 望京</option>
+            <option value="B">路线B：北京大学南门 → 颐和园</option>
+            <option value="C">路线C：王府井 → 朝阳公园</option>
+            <option value="D">路线D：国子监 → 安定门（短程测试）</option>
+            <option value="CUSTOM">📍 自定义起点和终点</option>
+          </select>
+          <!-- 自定义确认后显示起点地址名，点击可重新选择 -->
+          <span class="loc-addr-text placeholder" id="originAddrText" style="display:none" onclick="rePickOrigin()">点击重新选择起点</span>
+        </div>
+        <!-- 终点行 -->
+        <div class="loc-row">
+          <div class="loc-dot end"></div>
+          <span class="loc-addr-text placeholder" id="dest-display">目的地将自动填入</span>
+        </div>
       </div>
-      <div class="loc-row">
-        <div class="loc-dot end"></div>
-        <span id="dest-display" style="flex:1;font-size:15px;color:#999">目的地将自动填入</span>
+      <div class="price-estimate" id="price-box" style="display:none">
+        <div>
+          <div style="font-size:13px;color:#666;margin-bottom:4px">预估费用</div>
+          <div class="price" id="est-price">-</div>
+        </div>
+        <div class="detail" id="est-detail"></div>
       </div>
+      <button class="btn btn-secondary" onclick="estimatePrice()" style="margin-bottom:10px">预估价格</button>
+      <button class="btn btn-primary" onclick="doCreateOrder()">呼叫快车</button>
     </div>
-    <div class="price-estimate" id="price-box" style="display:none">
-      <div>
-        <div style="font-size:13px;color:#666;margin-bottom:4px">预估费用</div>
-        <div class="price" id="est-price">-</div>
-      </div>
-      <div class="detail" id="est-detail"></div>
-    </div>
-    <button class="btn btn-secondary" onclick="estimatePrice()" style="margin-bottom:10px">预估价格</button>
-    <button class="btn btn-primary" onclick="doCreateOrder()">呼叫快车</button>
   </div>
+
+  <!-- tab-bar 固定在底部 -->
   <div class="tab-bar">
     <div class="tab-item active" onclick="showScreen('home')">
       <div class="tab-icon">🏠</div>
@@ -437,7 +521,351 @@ let pollTimer = null;
 let currentOrder = null;
 let reviewStar = 5;
 let lastEstimatedPrice = null;
-let selectedRoute = null; // 当前选中的路线数据
+let selectedRoute = null; // 当前选中的路线数据（预设路线或自定义路线，结构相同）
+
+// ----------------------------------------------------------------
+// 主页地图（#home-map）
+// ----------------------------------------------------------------
+let homeMap = null; // 主页高德地图实例
+
+/**
+ * 初始化主页地图（仅首次，高德 SDK 加载完成后调用）
+ * 显示北京市区，zoom=13
+ */
+function initHomeMap() {
+  if (homeMap || typeof AMap === 'undefined') return;
+  homeMap = new AMap.Map('home-map', { zoom: 13, center: [116.3972, 39.9093] });
+  // 地图加载完成后初始化底部抽屉
+  initSheet();
+}
+
+// ----------------------------------------------------------------
+// 底部抽屉（Bottom Sheet）拖动交互
+// ----------------------------------------------------------------
+
+/**
+ * 抽屉有两个停靠位：
+ *   COLLAPSED：收起态，只露出把手 + 路线选择行（约 140px 高）
+ *   EXPANDED ：展开态，显示完整面板内容（约 320px 高）
+ *
+ * 通过 CSS transform: translateY() 控制位置。
+ * translateY(0) = 面板底部贴 tab-bar，完全展开。
+ * translateY(N) = 面板向下偏移 N px，即收起 N px。
+ */
+const SHEET_EXPANDED_HEIGHT  = 320; // 展开态面板高度（px）
+const SHEET_COLLAPSED_OFFSET = 180; // 收起态向下偏移量（px），即只露出 140px
+
+let sheetExpanded = true;  // 当前是否展开
+let sheetDragStartY = 0;
+let sheetDragStartOffset = 0;
+let sheetCurrentOffset = 0; // 当前 translateY 值
+
+function initSheet() {
+  const sheet = document.getElementById('orderSheet');
+  const handle = document.getElementById('sheetHandle');
+  if (!sheet || !handle) return;
+
+  // 设置面板高度
+  sheet.style.height = SHEET_EXPANDED_HEIGHT + 'px';
+  setSheetOffset(0, false); // 初始展开
+
+  // touch 拖动
+  handle.addEventListener('touchstart', onSheetTouchStart, { passive: true });
+  document.addEventListener('touchmove', onSheetTouchMove, { passive: false });
+  document.addEventListener('touchend', onSheetTouchEnd);
+
+  // 鼠标拖动（桌面调试用）
+  handle.addEventListener('mousedown', onSheetMouseDown);
+}
+
+function setSheetOffset(offset, animate = true) {
+  const sheet = document.getElementById('orderSheet');
+  if (!sheet) return;
+  sheetCurrentOffset = Math.max(0, Math.min(offset, SHEET_COLLAPSED_OFFSET));
+  sheet.style.transition = animate ? 'transform 0.3s cubic-bezier(0.4,0,0.2,1)' : 'none';
+  sheet.style.transform = `translateY(${sheetCurrentOffset}px)`;
+  sheetExpanded = sheetCurrentOffset < SHEET_COLLAPSED_OFFSET / 2;
+}
+
+function expandSheet()  { setSheetOffset(0); }
+function collapseSheet() { setSheetOffset(SHEET_COLLAPSED_OFFSET); }
+
+function onSheetTouchStart(e) {
+  sheetDragStartY = e.touches[0].clientY;
+  sheetDragStartOffset = sheetCurrentOffset;
+}
+function onSheetTouchMove(e) {
+  const dy = e.touches[0].clientY - sheetDragStartY;
+  setSheetOffset(sheetDragStartOffset + dy, false);
+  e.preventDefault();
+}
+function onSheetTouchEnd() {
+  // 超过中点则收起，否则展开
+  if (sheetCurrentOffset > SHEET_COLLAPSED_OFFSET / 2) collapseSheet();
+  else expandSheet();
+}
+
+function onSheetMouseDown(e) {
+  sheetDragStartY = e.clientY;
+  sheetDragStartOffset = sheetCurrentOffset;
+  const onMove = ev => setSheetOffset(sheetDragStartOffset + ev.clientY - sheetDragStartY, false);
+  const onUp   = () => {
+    if (sheetCurrentOffset > SHEET_COLLAPSED_OFFSET / 2) collapseSheet();
+    else expandSheet();
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// ----------------------------------------------------------------
+// 准星选点（自定义模式）
+// ----------------------------------------------------------------
+
+/**
+ * 准星选点状态：
+ *   'origin' → 正在选起点
+ *   'dest'   → 正在选终点
+ *   null     → 未在选点模式
+ */
+let crosshairMode = null;
+let crosshairOriginPending = null; // {lat, lng, addr}
+let crosshairDestPending   = null;
+
+// 地图移动防抖定时器（移动停止后才触发逆地理编码，避免频繁请求）
+let crosshairGeocodeTimer = null;
+
+/**
+ * 进入准星选点模式
+ * @param {'origin'|'dest'} mode
+ */
+function enterCrosshairMode(mode) {
+  crosshairMode = mode;
+  const overlay = document.getElementById('crosshairOverlay');
+  overlay.classList.add('show');
+
+  // 面板收起，地图最大化
+  collapseSheet();
+
+  // 更新顶部提示文字和底部按钮文字
+  const stepEl = document.getElementById('crosshairStep');
+  const btnEl  = document.getElementById('crosshairConfirmBtn');
+  if (mode === 'origin') {
+    stepEl.textContent = '第一步：选择起点';
+    btnEl.textContent  = '确认起点';
+    // 若已有起点，地图移到起点位置
+    if (crosshairOriginPending && homeMap) {
+      homeMap.setCenter([crosshairOriginPending.lng, crosshairOriginPending.lat]);
+    }
+  } else {
+    stepEl.textContent = '第二步：选择终点';
+    btnEl.textContent  = '确认终点';
+    if (crosshairDestPending && homeMap) {
+      homeMap.setCenter([crosshairDestPending.lng, crosshairDestPending.lat]);
+    }
+  }
+  document.getElementById('crosshairAddr').textContent = '移动地图，将准星对准目标位置';
+
+  // 监听地图移动，实时逆地理编码
+  if (homeMap) {
+    homeMap.on('moveend', onCrosshairMapMove);
+    // 立即触发一次，显示当前中心的地址
+    onCrosshairMapMove();
+  }
+}
+
+/**
+ * 地图移动结束时，对当前中心点做逆地理编码并更新提示
+ * 使用防抖：停止移动 300ms 后才请求，避免拖动时频繁调用
+ */
+function onCrosshairMapMove() {
+  if (!homeMap || !crosshairMode) return;
+  clearTimeout(crosshairGeocodeTimer);
+  document.getElementById('crosshairAddr').textContent = '获取地址中...';
+  crosshairGeocodeTimer = setTimeout(() => {
+    const center = homeMap.getCenter();
+    reverseGeocode(center.getLng(), center.getLat(), function(addr) {
+      if (!crosshairMode) return; // 已退出选点模式
+      document.getElementById('crosshairAddr').textContent = addr;
+    });
+  }, 300);
+}
+
+/**
+ * 确认当前准星位置
+ * 起点确认后自动切换到选终点；终点确认后退出准星模式，写入 selectedRoute
+ */
+function confirmCrosshairPos() {
+  if (!homeMap || !crosshairMode) return;
+  const center = homeMap.getCenter();
+  const lat = center.getLat();
+  const lng = center.getLng();
+  const addr = document.getElementById('crosshairAddr').textContent;
+
+  if (crosshairMode === 'origin') {
+    crosshairOriginPending = { lat, lng, addr };
+    // 自动切换到选终点
+    enterCrosshairMode('dest');
+  } else {
+    crosshairDestPending = { lat, lng, addr };
+    // 两点都选完，退出准星模式，写入 selectedRoute
+    exitCrosshairMode(true);
+  }
+}
+
+/**
+ * 退出准星选点模式
+ * @param {boolean} confirm  true=确认路线并展开面板，false=取消
+ */
+function exitCrosshairMode(confirm) {
+  crosshairMode = null;
+  clearTimeout(crosshairGeocodeTimer);
+  if (homeMap) homeMap.off('moveend', onCrosshairMapMove);
+
+  document.getElementById('crosshairOverlay').classList.remove('show');
+
+  if (confirm && crosshairOriginPending && crosshairDestPending) {
+    // 写入 selectedRoute，结构与预设路线一致
+    selectedRoute = {
+      originAddr: crosshairOriginPending.addr,
+      originLat:  crosshairOriginPending.lat,
+      originLng:  crosshairOriginPending.lng,
+      destAddr:   crosshairDestPending.addr,
+      destLat:    crosshairDestPending.lat,
+      destLng:    crosshairDestPending.lng,
+    };
+
+    // 起点行：隐藏下拉框，显示地址文字（需求1：显示地址名）
+    document.getElementById('route-select').style.display = 'none';
+    const originText = document.getElementById('originAddrText');
+    originText.textContent = selectedRoute.originAddr;
+    originText.classList.remove('placeholder');
+    originText.style.display = '';
+
+    // 终点行：显示地址名
+    const destEl = document.getElementById('dest-display');
+    destEl.textContent = selectedRoute.destAddr;
+    destEl.classList.remove('placeholder');
+
+    // 清空预估价
+    document.getElementById('price-box').style.display = 'none';
+    lastEstimatedPrice = null;
+  }
+
+  // 展开面板
+  expandSheet();
+}
+
+function cancelCrosshair() {
+  exitCrosshairMode(false);
+  // 若起点终点都未选，重置下拉框
+  if (!crosshairOriginPending && !crosshairDestPending) {
+    document.getElementById('route-select').value = '';
+  }
+}
+
+/**
+ * 点击起点地址文字，重新进入准星选点（从起点开始）
+ */
+function rePickOrigin() {
+  crosshairOriginPending = null;
+  crosshairDestPending   = null;
+  selectedRoute = null;
+  // 重置终点显示
+  const destEl = document.getElementById('dest-display');
+  destEl.textContent = '目的地将自动填入';
+  destEl.classList.add('placeholder');
+  document.getElementById('price-box').style.display = 'none';
+  lastEstimatedPrice = null;
+  enterCrosshairMode('origin');
+}
+
+// ----------------------------------------------------------------
+// 路线选择回调
+// ----------------------------------------------------------------
+function onRouteSelect() {
+  const key = document.getElementById('route-select').value;
+
+  if (!key) {
+    selectedRoute = null;
+    const destEl = document.getElementById('dest-display');
+    destEl.textContent = '目的地将自动填入';
+    destEl.classList.add('placeholder');
+    document.getElementById('price-box').style.display = 'none';
+    lastEstimatedPrice = null;
+    return;
+  }
+
+  if (key === 'CUSTOM') {
+    // 自定义模式：进入准星选点，面板自动收起
+    selectedRoute = null;
+    crosshairOriginPending = null;
+    crosshairDestPending   = null;
+    // 确保下拉框可见（可能之前被隐藏过）
+    document.getElementById('route-select').style.display = '';
+    document.getElementById('originAddrText').style.display = 'none';
+    enterCrosshairMode('origin');
+    return;
+  }
+
+  // 预设路线：恢复下拉框显示，隐藏地址文字
+  document.getElementById('route-select').style.display = '';
+  document.getElementById('originAddrText').style.display = 'none';
+
+  selectedRoute = PASSENGER_ROUTES[key];
+  const destEl = document.getElementById('dest-display');
+  destEl.textContent = selectedRoute.destAddr;
+  destEl.classList.remove('placeholder');
+  document.getElementById('price-box').style.display = 'none';
+  lastEstimatedPrice = null;
+
+  // 预设路线：地图移到起点位置
+  if (homeMap) homeMap.setCenter([selectedRoute.originLng, selectedRoute.originLat]);
+}
+
+// ----------------------------------------------------------------
+// 自定义坐标选择（旧的嵌入式小地图逻辑已废弃，保留 reverseGeocode 工具函数）
+// ----------------------------------------------------------------
+
+/**
+ * 高德逆地理编码：坐标 → 地址名
+ * @param {number} lng
+ * @param {number} lat
+ * @param {function} callback  回调参数为地址字符串
+ */
+function reverseGeocode(lng, lat, callback) {
+  if (typeof AMap === 'undefined' || typeof AMap.Geocoder === 'undefined') {
+    callback(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+    return;
+  }
+  const geocoder = new AMap.Geocoder({ radius: 100 });
+  geocoder.getAddress([lng, lat], function(status, result) {
+    if (status === 'complete' && result.regeocode) {
+      callback(result.regeocode.formattedAddress);
+    } else {
+      callback(`${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+    }
+  });
+}
+
+// rebook 时若是自定义路线，直接恢复地址文字显示
+function applyCustomRoute(originAddr, originLat, originLng, destAddr, destLat, destLng) {
+  selectedRoute = { originAddr, originLat, originLng, destAddr, destLat, destLng };
+  crosshairOriginPending = { lat: originLat, lng: originLng, addr: originAddr };
+  crosshairDestPending   = { lat: destLat,   lng: destLng,   addr: destAddr };
+
+  document.getElementById('route-select').value = 'CUSTOM';
+  document.getElementById('route-select').style.display = 'none';
+  const originText = document.getElementById('originAddrText');
+  originText.textContent = originAddr;
+  originText.classList.remove('placeholder');
+  originText.style.display = '';
+
+  const destEl = document.getElementById('dest-display');
+  destEl.textContent = destAddr;
+  destEl.classList.remove('placeholder');
+}
 
 // 高德地图实例和 marker（行程中页使用）
 let passengerTripMap = null;
@@ -558,24 +986,6 @@ function initPassengerTripMap(driverLat, driverLng, originLat, originLng) {
 // ----------------------------------------------------------------
 // 路线选择回调
 // ----------------------------------------------------------------
-function onRouteSelect() {
-  const key = document.getElementById('route-select').value;
-  if (!key) {
-    selectedRoute = null;
-    document.getElementById('dest-display').textContent = '目的地将自动填入';
-    document.getElementById('dest-display').style.color = '#999';
-    document.getElementById('price-box').style.display = 'none';
-    lastEstimatedPrice = null;
-    return;
-  }
-  selectedRoute = PASSENGER_ROUTES[key];
-  document.getElementById('dest-display').textContent = selectedRoute.destAddr;
-  document.getElementById('dest-display').style.color = '#333';
-  // 切换路线时清空上次预估价
-  document.getElementById('price-box').style.display = 'none';
-  lastEstimatedPrice = null;
-}
-
 // ---- 通用请求 ----
 async function api(path, opts = {}) {
   const res = await fetch(API + path, {
@@ -683,6 +1093,9 @@ function stopPolling() {
   passengerTripMap = null; passengerDriverMarker = null; passengerOriginMarker = null;
   passengerDriverLastPos = null;
   if (passengerDriverRafId) { cancelAnimationFrame(passengerDriverRafId); passengerDriverRafId = null; }
+  // 重置订单状态和聚焦状态，避免下次行程读到旧数据
+  currentOrder = null;
+  passengerFocusOnDriver = false;
 }
 
 /**
@@ -729,6 +1142,9 @@ async function pollOrderStatus() {
 
 // ---- 显示行程中页 ----
 async function showTripScreen(order) {
+  // 保存当前订单，供 focusToggleP 等函数读取坐标
+  currentOrder = order;
+
   // 填充路线信息
   document.getElementById('trip-origin').textContent = order.originAddr || '-';
   document.getElementById('trip-dest').textContent   = order.destAddr   || '-';
@@ -753,6 +1169,8 @@ async function pollTripStatus(orderId) {
   const r = await api(`/order/${orderId}`);
   if (r.code !== 200) return;
   const order = r.data;
+  // 同步更新 currentOrder，确保 focusToggleP 能读到最新的坐标和状态
+  currentOrder = order;
   updateTripSteps(order.status);
 
   // 轮询司机实时位置，做贴路 RAF 插值动画
@@ -801,7 +1219,8 @@ async function pollTripStatus(orderId) {
 }
 
 // 当前聚焦目标是否为司机（false = 聚焦另一方：我的位置或目的地）
-let passengerFocusOnDriver = true;
+// 初始为 false：按钮显示"🚗 司机"，表示点击后切换到聚焦司机，与司机端逻辑一致
+let passengerFocusOnDriver = false;
 
 /**
  * 单按钮切换聚焦：
@@ -899,20 +1318,27 @@ async function loadHistory() {
         </div>
         <div class="order-footer">
           <span class="amount">${amount}</span>
-          <span class="re-order" onclick="rebook('${o.originAddr}','${o.destAddr}')">再叫一次</span>
+          <span class="re-order" onclick="rebook('${o.originAddr}','${o.destAddr}','${o.originLat}','${o.originLng}','${o.destLat}','${o.destLng}')">再叫一次</span>
         </div>
       </div>`;
   }).join('');
 }
 
-function rebook(originAddr, destAddr) {
-  // 根据地址反查路线 key，自动选中对应路线
+function rebook(originAddr, destAddr, originLat, originLng, destLat, destLng) {
+  // 优先通过地址名反查预设路线 key，找到则直接选中下拉框
   const key = Object.keys(PASSENGER_ROUTES).find(k =>
     PASSENGER_ROUTES[k].originAddr === originAddr && PASSENGER_ROUTES[k].destAddr === destAddr
   );
   if (key) {
+    // 恢复下拉框显示（可能之前是自定义模式）
+    document.getElementById('route-select').style.display = '';
+    document.getElementById('originAddrText').style.display = 'none';
     document.getElementById('route-select').value = key;
     onRouteSelect();
+  } else if (originLat && originLng && destLat && destLng) {
+    // 自定义路线：直接恢复坐标和地址名，不需要重新点选地图
+    applyCustomRoute(originAddr, parseFloat(originLat), parseFloat(originLng),
+                     destAddr,   parseFloat(destLat),   parseFloat(destLng));
   }
   showScreen('home');
 }
@@ -936,10 +1362,12 @@ async function showPaymentScreen(order) {
   document.getElementById('bill-total').textContent = `¥ ${price}`;
 
   // 获取计价规则明细（用于账单拆分展示）
-  const lat1 = selectedRoute ? selectedRoute.originLat : 39.9268;
-  const lng1 = selectedRoute ? selectedRoute.originLng : 116.4392;
-  const lat2 = selectedRoute ? selectedRoute.destLat   : 39.9780;
-  const lng2 = selectedRoute ? selectedRoute.destLng   : 116.4920;
+  // selectedRoute 在自定义和预设模式下结构一致，直接读取；
+  // 若 selectedRoute 为 null（极端情况），从 order 对象取坐标兜底
+  const lat1 = selectedRoute ? selectedRoute.originLat : (order.originLat || 39.9268);
+  const lng1 = selectedRoute ? selectedRoute.originLng : (order.originLng || 116.4392);
+  const lat2 = selectedRoute ? selectedRoute.destLat   : (order.destLat   || 39.9780);
+  const lng2 = selectedRoute ? selectedRoute.destLng   : (order.destLng   || 116.4920);
   const r = await api(`/order/estimate?originLat=${lat1}&originLng=${lng1}&destLat=${lat2}&destLng=${lng2}&region=default`);
   if (r.code === 200) {
     const d = r.data;
@@ -1036,8 +1464,15 @@ api('/passenger/profile').then(r => {
 // 从后端获取高德 Key 后动态加载 SDK
 // 避免将 Key 硬编码在静态文件中
 fetch('/config/amap-key').then(r => r.json()).then(res => {
+  // 注入安全密钥（高德 JS API v2.0 要求）
+  window._AMapSecurityConfig = { securityJsCode: res.data.jscode };
   const script = document.createElement('script');
-  script.src = `https://webapi.amap.com/maps?v=2.0&key=${res.data.key}`;
+  // 加载 AMap.Geocoder 插件，用于准星选点时的逆地理编码（坐标→地址名）
+  script.src = `https://webapi.amap.com/maps?v=2.0&key=${res.data.key}&plugin=AMap.Geocoder`;
+  script.onload = function() {
+    // SDK 加载完成后初始化主页地图
+    initHomeMap();
+  };
   document.head.appendChild(script);
 });
 </script>

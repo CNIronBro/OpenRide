@@ -58,12 +58,18 @@
   /* 路线选择弹窗 */
   .route-select-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 200; align-items: flex-end; max-width: 390px; margin: 0 auto; }
   .route-select-overlay.show { display: flex; }
-  .route-select-panel { background: #fff; border-radius: 20px 20px 0 0; padding: 24px; width: 100%; }
+  .route-select-panel { background: #fff; border-radius: 20px 20px 0 0; padding: 24px; width: 100%; max-height: 85vh; overflow-y: auto; }
   .route-select-title { font-size: 16px; font-weight: bold; color: #333; margin-bottom: 16px; }
   .route-option { padding: 14px 16px; border: 2px solid #eee; border-radius: 10px; margin-bottom: 10px; cursor: pointer; }
   .route-option.selected { border-color: #ff6b00; background: #fff8f0; }
   .route-option-name { font-size: 15px; font-weight: bold; color: #333; }
   .route-option-desc { font-size: 12px; color: #999; margin-top: 4px; }
+  /* 自定义位置地图选择区 */
+  .custom-map-section { display: none; margin-top: 4px; }
+  .custom-map-section.show { display: block; }
+  #driver-custom-map { width: 100%; height: 200px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #eee; }
+  .custom-map-tip { font-size: 12px; color: #ff6b00; margin-bottom: 8px; text-align: center; }
+  .custom-addr-display { font-size: 13px; color: #333; background: #f9f9f9; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; min-height: 36px; }
 
   /* 新订单弹窗 */
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: flex-end; max-width: 390px; margin: 0 auto; }
@@ -220,6 +226,18 @@
       <div class="route-option-name">路线 E：管庄出发（扩圈测试）</div>
       <div class="route-option-desc">距三里屯约 10km，配合乘客路线A测试扩圈逻辑</div>
     </div>
+    <!-- 自定义位置选项：在地图上点选出发坐标 -->
+    <div class="route-option" id="routeOpt_CUSTOM" onclick="selectRoute('CUSTOM')">
+      <div class="route-option-name">📍 自定义位置</div>
+      <div class="route-option-desc">在地图上点击选择您的出发坐标</div>
+    </div>
+    <!-- 自定义地图选择区（仅选中 CUSTOM 时展开） -->
+    <div class="custom-map-section" id="driverCustomMapSection">
+      <div class="custom-map-tip">点击地图选择出发位置</div>
+      <div id="driver-custom-map"></div>
+      <div class="custom-addr-display" id="driverCustomAddrDisplay">尚未选择位置</div>
+      <button class="btn btn-primary" style="margin-bottom:8px" onclick="confirmCustomDriverPos()">确认此位置</button>
+    </div>
     <button class="btn btn-secondary" style="margin-top:8px" onclick="closeRouteSelect()">取消</button>
   </div>
 </div>
@@ -266,7 +284,7 @@
   <div style="position:relative">
     <div id="trip-map"></div>
     <div class="map-focus-btns">
-      <button class="map-focus-btn" id="focusToggleBtn" onclick="focusToggle()">👤 乘客</button>
+      <button class="map-focus-btn" id="focusToggleBtn" onclick="focusToggle()">📍 司机</button>
     </div>
   </div>
   <div class="trip-body">
@@ -366,7 +384,7 @@ let state = {
   countdownTimer: null,
   locationTimer: null,
   // 路线模拟相关
-  routeKey: null,          // 当前选择的路线 key：'A' | 'B' | 'C'
+  routeKey: null,          // 当前选择的路线 key：'A' | 'B' | 'C' | 'D' | 'E' | 'CUSTOM'
   routeSegment: null,      // 当前行进段：'toPickup' | 'toDestination' | null（等单时停在起点）
   routeArrived: false,     // 当前段是否已走完（等待司机手动确认）
   distanceCursor: 0,       // 沿当前路线段已行驶的累计距离（米），替代原来的索引步进
@@ -375,6 +393,9 @@ let state = {
   passengerLng: null,      // 乘客上车点经度
   destLat: null,           // 目的地纬度（IN_TRIP 阶段地图显示）
   destLng: null,           // 目的地经度
+  // 自定义出发位置（routeKey='CUSTOM' 时使用）
+  customLat: null,
+  customLng: null,
 };
 
 // ----------------------------------------------------------------
@@ -436,10 +457,16 @@ function renderHomeHeader() {
 async function toggleOnline() {
   const online = document.getElementById('onlineSwitch').checked;
 
-  // 上线前必须选择路线
+  // 上线前必须选择路线（预设路线或已确认的自定义坐标）
   if (online && !state.routeKey) {
     document.getElementById('onlineSwitch').checked = false;
     alert('请先选择出发位置，再上线接单');
+    return;
+  }
+  // 自定义模式下还需确认坐标已选
+  if (online && state.routeKey === 'CUSTOM' && (!state.customLat || !state.customLng)) {
+    document.getElementById('onlineSwitch').checked = false;
+    alert('请先在地图上确认出发位置，再上线接单');
     return;
   }
 
@@ -550,8 +577,10 @@ async function acceptOrder() {
   renderTripScreen(res.data);
   showScreen('trip');
   // 接单后立即规划司机起点→接客点的真实道路路线并缓存
-  // 司机起点取 ROUTE_STARTS 中对应路线的坐标
-  const start = ROUTE_STARTS[state.routeKey];
+  // 自定义模式使用用户点选坐标，预设路线使用 ROUTE_STARTS 中的坐标
+  const start = state.routeKey === 'CUSTOM'
+      ? { lat: state.customLat, lng: state.customLng }
+      : ROUTE_STARTS[state.routeKey];
   fetchAndCacheRoute('toPickup', start.lat, start.lng,
       state.passengerLat, state.passengerLng, state.currentOrderId);
 }
@@ -922,7 +951,12 @@ function startLocationReport() {
 
     if (!state.routeSegment) {
       // 等单中：停在路线起点不动
-      pos = ROUTE_STARTS[state.routeKey];
+      // 自定义模式使用用户点选的坐标，预设路线使用 ROUTE_STARTS 中的坐标
+      if (state.routeKey === 'CUSTOM') {
+        pos = { lat: state.customLat, lng: state.customLng };
+      } else {
+        pos = ROUTE_STARTS[state.routeKey];
+      }
     } else {
       const points = state.routePoints[state.routeSegment];
 
@@ -1049,10 +1083,15 @@ function interpolatePosAtDistance(points, targetMeters) {
 // ----------------------------------------------------------------
 function openRouteSelect() {
   // 高亮当前已选路线
-  ['A', 'B', 'C'].forEach(k => {
-    document.getElementById('routeOpt_' + k).classList.toggle('selected', state.routeKey === k);
+  ['A', 'B', 'C', 'D', 'E', 'CUSTOM'].forEach(k => {
+    const el = document.getElementById('routeOpt_' + k);
+    if (el) el.classList.toggle('selected', state.routeKey === k);
   });
   document.getElementById('routeSelectOverlay').classList.add('show');
+  // 若当前已是自定义模式，展开地图区
+  if (state.routeKey === 'CUSTOM') {
+    showDriverCustomMap();
+  }
 }
 
 function closeRouteSelect() {
@@ -1060,10 +1099,26 @@ function closeRouteSelect() {
 }
 
 function selectRoute(key) {
+  // 高亮选中项
+  ['A', 'B', 'C', 'D', 'E', 'CUSTOM'].forEach(k => {
+    const el = document.getElementById('routeOpt_' + k);
+    if (el) el.classList.toggle('selected', k === key);
+  });
+
+  if (key === 'CUSTOM') {
+    // 自定义模式：展开地图，等用户点选后再确认
+    showDriverCustomMap();
+    return; // 不立即关闭弹窗，等用户确认坐标
+  }
+
+  // 预设路线：直接确认
   state.routeKey = key;
   state.distanceCursor = 0;
   state.routeSegment = null;
   state.routeArrived = false;
+  // 清除自定义坐标
+  state.customLat = null;
+  state.customLng = null;
 
   const label = ROUTE_STARTS[key].label;
   const labelEl = document.getElementById('selectedRouteLabel');
@@ -1071,6 +1126,94 @@ function selectRoute(key) {
   labelEl.style.display = 'block';
   document.getElementById('selectRouteBtn').textContent = '更换出发位置';
 
+  // 收起自定义地图区
+  document.getElementById('driverCustomMapSection').classList.remove('show');
+  closeRouteSelect();
+}
+
+// ----------------------------------------------------------------
+// 自定义出发位置：地图点选
+// ----------------------------------------------------------------
+
+// 自定义地图实例（仅初始化一次，弹窗复用）
+let driverCustomMap = null;
+let driverCustomMarker = null;
+// 用户在自定义地图上点选的坐标（待确认）
+let driverCustomPending = null;
+
+/**
+ * 展开自定义地图选择区，初始化高德地图（仅首次）
+ * 地图中心默认为北京市中心，用户点击地图选择出发坐标
+ */
+function showDriverCustomMap() {
+  const section = document.getElementById('driverCustomMapSection');
+  section.classList.add('show');
+
+  // 高德 SDK 可能尚未加载完成，延迟初始化
+  if (typeof AMap === 'undefined') {
+    document.getElementById('driverCustomAddrDisplay').textContent = '地图加载中，请稍候...';
+    setTimeout(showDriverCustomMap, 500);
+    return;
+  }
+
+  if (driverCustomMap) return; // 已初始化，不重复创建
+
+  // 默认中心：北京市中心
+  driverCustomMap = new AMap.Map('driver-custom-map', { zoom: 13, center: [116.3972, 39.9093] });
+
+  // 点击地图选点
+  driverCustomMap.on('click', function(e) {
+    const lng = e.lnglat.getLng();
+    const lat = e.lnglat.getLat();
+    driverCustomPending = { lat, lng };
+
+    // 更新或创建 marker
+    if (driverCustomMarker) {
+      driverCustomMarker.setPosition([lng, lat]);
+    } else {
+      driverCustomMarker = new AMap.Marker({ map: driverCustomMap, position: [lng, lat] });
+    }
+
+    // 逆地理编码获取地址名
+    document.getElementById('driverCustomAddrDisplay').textContent = '获取地址中...';
+    const geocoder = new AMap.Geocoder({ radius: 100 });
+    geocoder.getAddress([lng, lat], function(status, result) {
+      if (status === 'complete' && result.regeocode) {
+        const addr = result.regeocode.formattedAddress;
+        document.getElementById('driverCustomAddrDisplay').textContent = addr;
+        driverCustomPending.addr = addr;
+      } else {
+        const fallback = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+        document.getElementById('driverCustomAddrDisplay').textContent = fallback;
+        driverCustomPending.addr = fallback;
+      }
+    });
+  });
+}
+
+/**
+ * 确认自定义出发位置，将坐标写入 state 并关闭弹窗
+ */
+function confirmCustomDriverPos() {
+  if (!driverCustomPending || !driverCustomPending.lat) {
+    alert('请先在地图上点击选择出发位置');
+    return;
+  }
+
+  state.routeKey = 'CUSTOM';
+  state.customLat = driverCustomPending.lat;
+  state.customLng = driverCustomPending.lng;
+  state.distanceCursor = 0;
+  state.routeSegment = null;
+  state.routeArrived = false;
+
+  const addr = driverCustomPending.addr || `${state.customLat.toFixed(5)}, ${state.customLng.toFixed(5)}`;
+  const labelEl = document.getElementById('selectedRouteLabel');
+  labelEl.textContent = '当前：' + addr;
+  labelEl.style.display = 'block';
+  document.getElementById('selectRouteBtn').textContent = '更换出发位置';
+
+  document.getElementById('driverCustomMapSection').classList.remove('show');
   closeRouteSelect();
 }
 
@@ -1136,7 +1279,8 @@ function doLogout() {
             currentOrderId: null, tripStatus: null, pollTimer: null,
             countdownTimer: null, locationTimer: null,
             routeKey: null, distanceCursor: 0, routePoints: {}, routeSegment: null, routeArrived: false,
-            passengerLat: null, passengerLng: null };
+            passengerLat: null, passengerLng: null,
+            customLat: null, customLng: null };
   tripMap = null; driverMarker = null; passengerMarker = null;
   driverLastPos = null;
   if (driverRafId) { cancelAnimationFrame(driverRafId); driverRafId = null; }
@@ -1167,7 +1311,7 @@ fetch('/config/amap-key').then(r => r.json()).then(res => {
   window._AMapSecurityConfig = { securityJsCode: res.data.jscode };
   const script = document.createElement('script');
   // 加载 AMap.Driving 插件，用于接单/开始行程时规划真实道路路线
-  script.src = `https://webapi.amap.com/maps?v=2.0&key=${res.data.key}&plugin=AMap.Driving`;
+  script.src = `https://webapi.amap.com/maps?v=2.0&key=${res.data.key}&plugin=AMap.Driving,AMap.Geocoder`;
   document.head.appendChild(script);
 });
 </script>
