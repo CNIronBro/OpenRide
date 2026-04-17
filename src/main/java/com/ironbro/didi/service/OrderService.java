@@ -22,7 +22,10 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.time.LocalDateTime;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 订单服务
@@ -144,9 +147,14 @@ public class OrderService {
      * 若 version 不匹配（已被其他司机接单），updateById 返回影响行数为 0，
      * MyBatis-Plus 会抛出 OptimisticLockerException，此处捕获后转为业务异常。
      *
+     * 批量派单场景下的并发处理：
+     * 同批 N 个司机并发接单，CAS 保证只有一个成功，其余 N-1 个收到"订单已被他人接走"。
+     * 接单成功后主动清除同批其他司机的 pending key，让其弹窗尽快关闭（约 12s TTL 内）。
+     *
      * 接单成功后副作用：
      * 1. 司机状态改为 IN_TRIP，从 GEO 在线集合移除（不再参与新派单）
-     * 2. 清除司机待接单通知 key（driver:pending:order:{driverId}）
+     * 2. 清除接单司机的待接单通知 key（driver:pending:order:{driverId}）
+     * 3. 清除同批其他司机的待接单通知 key
      *
      * @param orderId  订单 ID
      * @param driverId 司机的 driver.id（非 user_id）
@@ -168,8 +176,34 @@ public class OrderService {
         order.setRouteKey(routeKey);
         int rows = orderMapper.updateById(order);
         if (rows == 0) {
-            // 乐观锁冲突：订单已被其他司机抢走
-            throw new BizException(409, "订单已被其他司机接单");
+            // 乐观锁冲突：重新查询订单状态，给出更精确的错误提示
+            // 批量派单场景下，同批多个司机并发接单，N-1 个会走到这里
+            Order current = orderMapper.selectById(orderId);
+            if (current != null && current.getStatus() == OrderStatus.ACCEPTED) {
+                throw new BizException(409, "订单已被他人接走");
+            }
+            throw new BizException(409, "订单已被接单或已取消");
+        }
+
+        // 接单成功：清除同批其他司机的 pending key，让其弹窗尽快关闭
+        // 读取当前批次号，再读批次 SET，过滤掉接单司机自身，批量删除其余司机的 pending key
+        // 注意：此操作允许最终一致——批次 SET 可能已 TTL 过期，此时依赖 pending key 自身 12s TTL 自然过期兜底
+        String batchIndexKey = "order:dispatch:batch:index:" + orderId;
+        String batchIndexStr = redisTemplate.opsForValue().get(batchIndexKey);
+        if (batchIndexStr != null) {
+            String batchSetKey = "order:dispatch:batch:" + orderId + ":" + batchIndexStr;
+            Set<String> batchMembers = redisTemplate.opsForSet().members(batchSetKey);
+            if (batchMembers != null && !batchMembers.isEmpty()) {
+                List<String> keysToDelete = batchMembers.stream()
+                        .filter(id -> !id.equals(String.valueOf(driverId)))
+                        .map(id -> "driver:pending:order:" + id)
+                        .collect(Collectors.toList());
+                if (!keysToDelete.isEmpty()) {
+                    // delete(Collection) 底层发送单条 DEL key1 key2 ... 命令，比逐个删除高效
+                    redisTemplate.delete(keysToDelete);
+                    log.info("清除同批其他司机 pending key orderId={} keys={}", orderId, keysToDelete);
+                }
+            }
         }
 
         // 接单成功：更新司机状态为 IN_TRIP，从 GEO 在线集合移除
@@ -178,11 +212,10 @@ public class OrderService {
             driver.setStatus(DriverStatus.IN_TRIP);
             driverMapper.updateById(driver);
             // 从 GEO 在线集合移除，行程中司机不参与新派单
-            // 城市默认 "default"，阶段 7 可扩展为从订单中取 city
             redisTemplate.opsForZSet().remove("driver:online:default", String.valueOf(driverId));
         }
 
-        // 清除司机待接单通知 key，避免司机端重复弹窗
+        // 清除接单司机的待接单通知 key，避免司机端重复弹窗
         redisTemplate.delete("driver:pending:order:" + driverId);
 
         log.info("司机接单成功 orderId={} driverId={}", orderId, driverId);

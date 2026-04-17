@@ -505,7 +505,20 @@ function stopPollPendingOrder() {
 }
 
 async function pollPendingOrder() {
-  if (state.currentOrderId) return; // 已有待处理订单，不重复弹窗
+  // 弹窗显示中：检测 pending key 是否已消失（被接单清除或 TTL 过期）
+  if (state.currentOrderId) {
+    const res = await api('/driver/pending-order', 'GET');
+    // key 消失说明订单已被他人接走或批次窗口已过期，静默关闭弹窗
+    // 不主动查询订单状态，依赖司机主动点击接单时的错误提示来区分原因
+    if (!res.ok || !res.data.orderId) {
+      clearCountdown();
+      document.getElementById('orderModal').classList.remove('show');
+      state.currentOrderId = null;
+    }
+    return;
+  }
+
+  // 无当前订单：检查是否有新的待接单通知
   const res = await api('/driver/pending-order', 'GET');
   if (!res.ok || !res.data.orderId) return;
 
@@ -526,7 +539,7 @@ function showOrderModal(order) {
   document.getElementById('modalDest').textContent   = order.destAddr   || '终点';
   document.getElementById('modalPrice').textContent  = '¥' + (order.estimatedPrice || '—');
   document.getElementById('orderModal').classList.add('show');
-  startCountdown(15);
+  startCountdown(10);
 }
 
 function startCountdown(seconds) {
@@ -560,7 +573,11 @@ async function acceptOrder() {
 
   const res = await api('/order/' + state.currentOrderId + '/accept', 'POST', { routeKey: state.routeKey });
   if (!res.ok) {
-    alert(res.msg || '接单失败，订单已被抢走');
+    if (res.msg && res.msg.includes('已被他人接走')) {
+      alert('手慢了，订单已被他人接走');
+    } else {
+      alert(res.msg || '接单失败');
+    }
     state.currentOrderId = null;
     return;
   }

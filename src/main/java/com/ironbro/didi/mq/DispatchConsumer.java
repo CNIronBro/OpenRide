@@ -41,12 +41,17 @@ import java.util.concurrent.TimeUnit;
  * 派单消费者
  *
  * 消费 dispatch.queue 中的新订单派单消息，执行：
- * 1. GEO 召回附近在线司机候选列表
- * 2. 调度评分排序，选出最优司机
+ * 1. GEO 召回附近在线司机候选列表（最多 MAX_CANDIDATES=20 人）
+ * 2. 调度评分排序，选出最优候选列表
  * 3. 将候选列表序列化存入 Redis（key=order:candidates:{orderId}，TTL=10min）
- * 4. 将当前派单索引（0）存入 Redis（key=order:dispatch:index:{orderId}）
- * 5. 推送新订单通知给最优司机（写 Redis，司机端轮询）
- * 6. 发送延迟消息到 dispatch.exchange（x-delay=15s），消息体携带 orderId + dispatchIndex=0
+ * 4. 写入初始批次号（key=order:dispatch:batch:index:{orderId}=0）和初始搜索半径
+ * 5. 批量推送新订单通知给前 BATCH_SIZE 位司机（写 Redis，司机端轮询）
+ * 6. 发送一条延迟消息到 dispatch.exchange（x-delay=10s），代表整批的接单窗口
+ *
+ * 批量派单说明：
+ * 每批同时推送 BATCH_SIZE=3 位司机，10s 内任意一人接单即成功（CAS 乐观锁兜底并发）。
+ * 10s 后 RetryConsumer 统一判断是否有人接单，未接单则推下一批。
+ * 候选列表耗尽后重新 GEO 召回，无新司机则按步进表扩圈，超过 120s 取消订单。
  *
  * 幂等说明（阶段 7 实现）：
  * 消费前用 Redisson tryLock（key=lock:dispatch:{orderId}），防止同一订单的派单消息
@@ -66,14 +71,29 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class DispatchConsumer {
 
-    /** GEO 召回半径（公里） */
+    /** GEO 召回初始半径（公里） */
     private static final double DISPATCH_RADIUS_KM = 5.0;
 
-    /** 最多召回候选司机数量 */
-    private static final int MAX_CANDIDATES = 10;
+    /** 最多召回候选司机数量，调大以尽可能多召回，减少候选耗尽后重新召回的频率 */
+    private static final int MAX_CANDIDATES = 20;
 
     /** 候选列表在 Redis 中的 TTL（分钟） */
     private static final long CANDIDATES_TTL_MINUTES = 10;
+
+    /** 每批同时推送的司机数量（Top-N 批量派单） */
+    private static final int BATCH_SIZE = 3;
+
+    /**
+     * 每批派单窗口时长（毫秒）
+     * 10s 内同批司机竞争接单，窗口到期后 RetryConsumer 统一判断是否推下一批
+     */
+    private static final int BATCH_DELAY_MS = 10_000;
+
+    /**
+     * driver:pending:order TTL（秒），略大于批次窗口
+     * 保证司机端在窗口内有足够时间轮询到通知
+     */
+    private static final int PENDING_TTL_SECONDS = 12;
 
     private final OrderMapper orderMapper;
     private final DriverMapper driverMapper;
@@ -191,10 +211,10 @@ public class DispatchConsumer {
                 originLat, originLng, DISPATCH_RADIUS_KM, city, MAX_CANDIDATES);
 
         if (nearbyDriverIds.isEmpty()) {
-            // 附近暂无在线司机，不立即取消，发延迟消息等待司机上线
-            // waitedSeconds=0 表示本次是第一次无司机，RetryConsumer 收到后会重新 GEO 召回
+            // 附近暂无在线司机，不立即取消，发 batchIndex=-1 延迟消息
+            // RetryConsumer 收到后走 handleExhausted，尝试扩圈或等待新司机进入范围
             log.info("附近无在线司机，等待重试 orderId={}", orderId);
-            sendNoDriverDelayMessage(orderId, 0, DISPATCH_RADIUS_KM);
+            sendDelayMessage(orderId, -1);
             return;
         }
 
@@ -208,7 +228,7 @@ public class DispatchConsumer {
         if (drivers.isEmpty()) {
             // GEO 召回有结果但 DB 查询后均不可用（状态变更竞态），同样等待重试
             log.info("候选司机均不可用，等待重试 orderId={}", orderId);
-            sendNoDriverDelayMessage(orderId, 0, DISPATCH_RADIUS_KM);
+            sendDelayMessage(orderId, -1);
             return;
         }
 
@@ -227,26 +247,43 @@ public class DispatchConsumer {
         redisTemplate.opsForValue().set(candidatesKey, candidatesJson,
                 Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 5.3.3 将当前派单索引（0）存入 Redis
-        // key=order:dispatch:index:{orderId}，value=当前正在派单的候选列表下标
-        String indexKey = "order:dispatch:index:" + orderId;
-        redisTemplate.opsForValue().set(indexKey, "0", Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
+        // 写入初始搜索半径，供 RetryConsumer 候选耗尽后扩圈使用
+        // key=order:dispatch:radius:{orderId}
+        String radiusKey = "order:dispatch:radius:" + orderId;
+        redisTemplate.opsForValue().set(radiusKey, String.valueOf(DISPATCH_RADIUS_KM),
+                Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 5.3.4 推送新订单通知给第一位司机（写 Redis，司机端轮询）
-        Long targetDriverId = sortedDriverIds.get(0);
-        pushOrderToDriver(orderId, targetDriverId);
+        // 写入初始批次号 = 0
+        // key=order:dispatch:batch:index:{orderId}
+        String batchIndexKey = "order:dispatch:batch:index:" + orderId;
+        redisTemplate.opsForValue().set(batchIndexKey, "0",
+                Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 更新司机的最近派单时间和今日派单次数
-        updateDriverDispatchStats(targetDriverId);
+        // 取第一批司机（candidates[0..BATCH_SIZE-1]），批量推送
+        int batchEnd = Math.min(BATCH_SIZE, sortedDriverIds.size());
+        List<Long> firstBatch = sortedDriverIds.subList(0, batchEnd);
 
-        // 记录派单日志
-        saveDispatchLog(orderId, targetDriverId, DispatchAction.DISPATCHED, "初次派单，index=0");
+        // 写批次司机集合：key=order:dispatch:batch:{orderId}:0，TTL=PENDING_TTL_SECONDS
+        // 接单成功后 OrderService 读取此集合，批量清除同批其他司机的 pending key
+        String batchSetKey = "order:dispatch:batch:" + orderId + ":0";
+        String[] batchMembers = firstBatch.stream()
+                .map(String::valueOf).toArray(String[]::new);
+        redisTemplate.opsForSet().add(batchSetKey, batchMembers);
+        redisTemplate.expire(batchSetKey, Duration.ofSeconds(PENDING_TTL_SECONDS));
 
-        // 5.3.5 发送延迟消息（x-delay=15s），消息体携带 orderId + dispatchIndex=0
-        // 15s 后若司机未接单，RetryConsumer 将尝试派给下一位候选司机
+        // 批量推送：每位司机写 pending key，更新派单统计，记录日志
+        for (Long driverId : firstBatch) {
+            pushOrderToDriver(orderId, driverId);
+            updateDriverDispatchStats(driverId);
+            saveDispatchLog(orderId, driverId, DispatchAction.DISPATCHED, "批量派单 batch=0");
+        }
+
+        // 发一条延迟消息代表整批的接单窗口（x-delay=10s）
+        // 10s 后 RetryConsumer 统一判断是否有人接单，而非每个司机单独计时
         sendDelayMessage(orderId, 0);
 
-        log.info("派单成功 orderId={} targetDriverId={} candidates={}", orderId, targetDriverId, sortedDriverIds.size());
+        log.info("批量派单成功 orderId={} batch=0 drivers={} totalCandidates={}",
+                orderId, firstBatch, sortedDriverIds.size());
     }
 
     /**
@@ -285,7 +322,7 @@ public class DispatchConsumer {
      * 推送新订单通知给司机
      *
      * 写入 Redis，司机端通过轮询 GET /driver/pending-order 读取。
-     * key=driver:pending:order:{driverId}，value=orderId，TTL=20s（略大于 15s 派单超时）
+     * key=driver:pending:order:{driverId}，value=orderId，TTL=PENDING_TTL_SECONDS（12s，略大于 10s 批次窗口）
      *
      * 重复推送防护（7.3）：
      * 推送前检查 Redis Set（key=order:dispatched:drivers:{orderId}），
@@ -293,8 +330,8 @@ public class DispatchConsumer {
      * 使用 SADD 的原子性保证"检查+写入"不存在竞态。
      *
      * 设计意图：
-     * 不使用 WebSocket 推送（阶段 6 约束），司机端每 2s 轮询一次此 key，
-     * 有值则弹出新订单弹窗，15s 倒计时内接单或忽略。
+     * 不使用 WebSocket 推送，司机端每 2s 轮询一次此 key，
+     * 有值则弹出新订单弹窗，10s 倒计时内接单或忽略。
      *
      * @return true=推送成功，false=该司机已被推送过（跳过）
      */
@@ -312,8 +349,8 @@ public class DispatchConsumer {
         }
 
         String key = "driver:pending:order:" + driverId;
-        // TTL=20s，略大于 15s 派单超时，保证司机端有足够时间轮询到
-        redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(20));
+        // TTL=PENDING_TTL_SECONDS（12s），略大于 10s 批次窗口，保证司机端有足够时间轮询到
+        redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(PENDING_TTL_SECONDS));
         log.debug("推送订单通知 driverId={} orderId={}", driverId, orderId);
         return true;
     }
@@ -336,54 +373,27 @@ public class DispatchConsumer {
     /**
      * 发送延迟消息
      *
-     * 通过 rabbitmq-delayed-message-exchange 插件实现 15s 延迟：
-     * 在消息 header 中设置 x-delay=15000（毫秒），Broker 持有消息直到延迟到期后路由到 dispatch.retry.queue。
-     * 消息体携带 orderId + dispatchIndex，用于 RetryConsumer 的幂等校验。
+     * 通过 rabbitmq-delayed-message-exchange 插件实现 10s 延迟：
+     * 在消息 header 中设置 x-delay=10000（毫秒），Broker 持有消息直到延迟到期后路由到 dispatch.retry.queue。
+     * 消息体携带 orderId + batchIndex，用于 RetryConsumer 的幂等校验。
      *
-     * @param orderId       订单 ID
-     * @param dispatchIndex 当前派单的候选列表下标
+     * 特殊值 batchIndex=-1：表示当前无候选司机，RetryConsumer 收到后直接走 handleExhausted 扩圈逻辑，
+     * 跳过正常的幂等校验流程。
+     *
+     * @param orderId    订单 ID
+     * @param batchIndex 当前批次号（-1 表示无候选司机等待扩圈）
      */
-    // QUESTION
-    private void sendDelayMessage(Long orderId, int dispatchIndex) {
+    private void sendDelayMessage(Long orderId, int batchIndex) {
         Map<String, Object> msg = new HashMap<>();
         msg.put("orderId", orderId);
-        msg.put("dispatchIndex", dispatchIndex);
+        msg.put("batchIndex", batchIndex);
 
-        // 延迟15s
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,
                 msg,
                 m -> {
-                    m.getMessageProperties().setHeader("x-delay", 15_000);
-                    return m;
-                }
-        );
-    }
-
-    /**
-     * 无司机时发延迟消息，等待 15s 后由 RetryConsumer 重新 GEO 召回
-     *
-     * currentRadiusKm 携带本轮使用的搜索半径，RetryConsumer 收到后据此决定下一轮扩圈半径。
-     * 初始调用时传入 DISPATCH_RADIUS_KM（5.0km），作为扩圈起点。
-     *
-     * @param orderId        订单 ID
-     * @param waitedSeconds  已等待秒数（每轮 +15）
-     * @param currentRadiusKm 本轮搜索半径（公里）
-     */
-    private void sendNoDriverDelayMessage(Long orderId, int waitedSeconds, double currentRadiusKm) {
-        Map<String, Object> msg = new HashMap<>();
-        msg.put("orderId", orderId);
-        msg.put("dispatchIndex", -1);       // 无司机重试不使用 dispatchIndex，填 -1 占位
-        msg.put("noDriverRetry", true);
-        msg.put("waitedSeconds", waitedSeconds);
-        msg.put("currentRadiusKm", currentRadiusKm);  // 本轮搜索半径，用于下一轮扩圈决策
-        rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DISPATCH_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
-                msg,
-                m -> {
-                    m.getMessageProperties().setHeader("x-delay", 15_000);
+                    m.getMessageProperties().setHeader("x-delay", BATCH_DELAY_MS);
                     return m;
                 }
         );
