@@ -9,6 +9,8 @@ import com.ironbro.didi.enums.DispatchAction;
 import com.ironbro.didi.enums.OrderStatus;
 import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
+import com.ironbro.didi.websocket.WebSocketSessionManager;
+import com.ironbro.didi.websocket.WsMessage;
 import com.rabbitmq.client.Channel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +42,7 @@ public class CancelConsumer {
     private final OrderMapper orderMapper;
     private final OrderDispatchLogMapper dispatchLogMapper;
     private final ObjectMapper objectMapper;
+    private final WebSocketSessionManager wsSessionManager;
 
     /**
      * 消费取消消息
@@ -113,7 +116,14 @@ public class CancelConsumer {
 
         log.info("订单已自动取消 orderId={} reason={}", orderId, reason);
 
-        // TODO 阶段 5 暂不实现推送通知，乘客端通过轮询订单状态感知取消
-        // 后续可接入 WebSocket 或消息推送服务通知乘客
+        // WS 推送取消通知给乘客，让乘客端立即感知，无需等待下次轮询
+        // passengerId 即乘客的 user_id，与 WS session 的 userId 一致
+        try {
+            wsSessionManager.sendToUser(order.getPassengerId(),
+                    new WsMessage("ORDER_CANCELLED", Map.of("orderId", orderId, "reason", reason)));
+        } catch (Exception e) {
+            // WS 推送失败不影响主流程，乘客端轮询兜底（最坏延迟 3s）
+            log.warn("WS 推送取消通知失败，依赖乘客端轮询兜底 orderId={}", orderId, e);
+        }
     }
 }

@@ -872,7 +872,149 @@ let passengerTripMap = null;
 let passengerDriverMarker = null;
 let passengerOriginMarker = null;
 
-// 乘客端地图动画状态
+// ----------------------------------------------------------------
+// WebSocket 连接管理（第一期）
+// ----------------------------------------------------------------
+let ws = null;
+let wsConnected = false;
+let wsReconnectDelay = 1000;  // 指数退避初始延迟（ms）
+let wsPingTimer = null;
+let wsPongTimeout = null;
+
+/**
+ * 建立 WebSocket 连接
+ *
+ * 连接时机：下单成功后（createOrder 回调中）调用，而非登录时。
+ * 原因：乘客无订单时无需推送，登录即建连会浪费连接资源。
+ * 断线时：自动按指数退避重连，仅在有活跃订单时才重连。
+ */
+function connectWs() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    wsConnected = true;
+    wsReconnectDelay = 1000;
+    startWsHeartbeat();
+    // WS 在线时降低轮询频率至 10s（纯兜底）
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollOrderStatus, 10000);
+    }
+    // 重连后立即触发一次状态同步，防止断线期间的状态变更被遗漏
+    // WS 是 at-most-once，断线期间的推送消息已丢失，必须主动拉取一次
+    pollOrderStatus();
+    console.log('[WS] 连接建立');
+  };
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === 'PONG') {
+      clearTimeout(wsPongTimeout);
+      return;
+    }
+
+    if (msg.type === 'ORDER_ACCEPTED') {
+      // 直接用 payload 中的数据立即跳转，不等轮询往返
+      // payload 只含 orderId/driverId，司机详情由 showTripScreen 异步加载
+      if (!currentOrderId || msg.payload.orderId != currentOrderId) return;
+      // 停止等待页轮询，切换到行程中页
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      // 构造最小 order 对象用于立即渲染，完整数据由 pollTripStatus 补全
+      const minOrder = {
+        id: msg.payload.orderId,
+        driverId: msg.payload.driverId,
+        status: 'ACCEPTED',
+        originAddr: document.getElementById('w-origin').textContent,
+        destAddr:   document.getElementById('w-dest').textContent,
+        originLat: selectedRoute ? selectedRoute.originLat : null,
+        originLng: selectedRoute ? selectedRoute.originLng : null,
+        destLat:   selectedRoute ? selectedRoute.destLat   : null,
+        destLng:   selectedRoute ? selectedRoute.destLng   : null,
+      };
+      showTripScreen(minOrder);
+      pollTimer = setInterval(() => pollTripStatus(minOrder.id), 2000);
+      return;
+    }
+
+    if (msg.type === 'ORDER_CANCELLED') {
+      // 幂等：若 orderId 与当前活跃订单不匹配，忽略
+      if (!currentOrderId || msg.payload.orderId != currentOrderId) return;
+      // 直接操作 pollTimer 而非调用 stopPolling()，
+      // 避免 stopPolling() 清空地图状态（行程中页面会白屏）
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      disconnectWs();
+      alert('很抱歉，附近暂无可用司机，订单已自动取消。');
+      currentOrderId = null;
+      showScreen('home');
+      return;
+    }
+
+    if (msg.type === 'DISPATCH_RETRYING') {
+      if (!currentOrderId || msg.payload.orderId != currentOrderId) return;
+      document.getElementById('w-order-status').textContent = '正在重新匹配司机...';
+    }
+  };
+
+  ws.onclose = () => {
+    wsConnected = false;
+    stopWsHeartbeat();
+    console.log('[WS] 连接断开，降级为轮询兜底');
+    // 断线后恢复原有轮询频率（直接操作 pollTimer，不调用 stopPolling()，避免清空地图状态）
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollOrderStatus, 3000);
+    }
+    // 仅在有活跃订单时才重连，避免无订单状态下无意义重连
+    if (currentOrderId) {
+      const jitter = Math.random() * 1000;
+      setTimeout(connectWs, wsReconnectDelay + jitter);
+      wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
+    }
+  };
+
+  ws.onerror = () => {
+    console.warn('[WS] 连接异常');
+  };
+}
+
+/** 主动断开 WebSocket（订单进入终态后调用） */
+function disconnectWs() {
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  wsConnected = false;
+  wsReconnectDelay = 1000;
+  stopWsHeartbeat();
+}
+
+/**
+ * 启动心跳定时器
+ * 每 25s 发一次 PING，5s 内未收到 PONG 则认为连接已死，主动关闭触发重连。
+ */
+function startWsHeartbeat() {
+  stopWsHeartbeat();
+  wsPingTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'PING' }));
+      wsPongTimeout = setTimeout(() => {
+        console.warn('[WS] PONG 超时，主动关闭连接触发重连');
+        ws.close();
+      }, 5000);
+    }
+  }, 25000);
+}
+
+function stopWsHeartbeat() {
+  clearInterval(wsPingTimer);
+  clearTimeout(wsPongTimeout);
+  wsPingTimer = null;
+  wsPongTimeout = null;
+}
 let passengerDriverLastPos = null; // 上一次已知的司机坐标（插值起点）
 let passengerDriverRafId = null;   // 当前 RAF 动画 id
 
@@ -1061,6 +1203,9 @@ async function doCreateOrder() {
 
   currentOrderId = r.data.id;
 
+  // 下单成功后建立 WS 连接，用于接收派单通知、接单通知、取消通知
+  connectWs();
+
   document.getElementById('w-origin').textContent = originAddr;
   document.getElementById('w-dest').textContent   = destAddr;
   document.getElementById('w-price').textContent  = `¥${r.data.estimatedPrice}`;
@@ -1131,9 +1276,11 @@ async function pollOrderStatus() {
     pollTimer = setInterval(() => pollTripStatus(order.id), 2000);
   } else if (order.status === 'FINISHED') {
     stopPolling();
+    disconnectWs();
     showPaymentScreen(order);
   } else if (order.status === 'CANCELLED') {
     stopPolling();
+    disconnectWs();
     alert('很抱歉，附近暂无可用司机，订单已自动取消。');
     currentOrderId = null;
     showScreen('home');
@@ -1210,9 +1357,11 @@ async function pollTripStatus(orderId) {
 
   if (order.status === 'FINISHED') {
     stopPolling();
+    disconnectWs();
     showPaymentScreen(order);
   } else if (order.status === 'CANCELLED') {
     stopPolling();
+    disconnectWs();
     alert('行程已取消。');
     showScreen('home');
   }

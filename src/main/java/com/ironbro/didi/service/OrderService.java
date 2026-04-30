@@ -16,6 +16,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.ironbro.didi.websocket.WebSocketSessionManager;
+import com.ironbro.didi.websocket.WsMessage;
 import java.math.BigDecimal;
 import java.time.Duration;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -51,6 +53,7 @@ public class OrderService {
     private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
     private final PricingService pricingService;
+    private final WebSocketSessionManager wsSessionManager;
 
     /**
      * 乘客下单
@@ -203,6 +206,24 @@ public class OrderService {
                     redisTemplate.delete(keysToDelete);
                     log.info("清除同批其他司机 pending key orderId={} keys={}", orderId, keysToDelete);
                 }
+
+                // WS 推送：通知同批其他司机立即关闭弹窗，并显示"已被他人接走"
+                // 在已有的批次成员遍历基础上追加，不重复查询 Redis
+                // 每个 driverId 是 driver.id，需转换为 userId 才能找到对应的 WS session
+                batchMembers.stream()
+                        .filter(id -> !id.equals(String.valueOf(driverId)))
+                        .forEach(id -> {
+                            try {
+                                Driver otherDriver = driverMapper.selectById(Long.parseLong(id));
+                                if (otherDriver != null) {
+                                    wsSessionManager.sendToUser(otherDriver.getUserId(),
+                                            new WsMessage("DISPATCH_CANCELLED",
+                                                    Map.of("orderId", orderId, "reason", "TAKEN")));
+                                }
+                            } catch (Exception e) {
+                                log.warn("WS 推送同批司机关闭弹窗失败 driverId={} orderId={}", id, orderId, e);
+                            }
+                        });
             }
         }
 
@@ -217,6 +238,17 @@ public class OrderService {
 
         // 清除接单司机的待接单通知 key，避免司机端重复弹窗
         redisTemplate.delete("driver:pending:order:" + driverId);
+
+        // WS 推送：通知乘客司机已接单，让乘客端立即跳转行程中页
+        // payload 只含 orderId/driverId，前端收到后需再发一次 GET /order/{id} 拉取司机姓名、车牌等展示字段
+        // passengerId 即乘客的 user_id，与 WS session 的 userId 一致
+        try {
+            wsSessionManager.sendToUser(order.getPassengerId(),
+                    new WsMessage("ORDER_ACCEPTED", Map.of("orderId", orderId, "driverId", driverId)));
+        } catch (Exception e) {
+            // WS 推送失败不影响接单主流程，乘客端轮询兜底（最坏延迟 3s）
+            log.warn("WS 推送接单通知失败，依赖乘客端轮询兜底 orderId={}", orderId, e);
+        }
 
         log.info("司机接单成功 orderId={} driverId={}", orderId, driverId);
         return orderMapper.selectById(orderId);

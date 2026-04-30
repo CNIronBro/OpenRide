@@ -16,6 +16,8 @@ import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
 import com.ironbro.didi.service.DispatchScoreService;
 import com.ironbro.didi.service.DriverLocationService;
+import com.ironbro.didi.websocket.WebSocketSessionManager;
+import com.ironbro.didi.websocket.WsMessage;
 import com.rabbitmq.client.Channel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -104,6 +106,7 @@ public class DispatchConsumer {
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
+    private final WebSocketSessionManager wsSessionManager;
 
     /**
      * 消费派单消息
@@ -352,6 +355,20 @@ public class DispatchConsumer {
         // TTL=PENDING_TTL_SECONDS（12s），略大于 10s 批次窗口，保证司机端有足够时间轮询到
         redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(PENDING_TTL_SECONDS));
         log.debug("推送订单通知 driverId={} orderId={}", driverId, orderId);
+
+        // WS 推送派单通知（Redis key 保留作为兜底，WS 失败时司机端轮询仍可感知）
+        // driverId 是 driver.id（司机表主键），WS session 以 userId（user 表主键）索引，需转换
+        try {
+            Driver driver = driverMapper.selectById(driverId);
+            if (driver != null) {
+                wsSessionManager.sendToUser(driver.getUserId(),
+                        new WsMessage("DISPATCH_NOTIFY", Map.of("orderId", orderId)));
+            }
+        } catch (Exception e) {
+            // WS 推送失败不影响主流程，司机端轮询兜底
+            log.warn("WS 推送派单通知失败，依赖司机端轮询兜底 driverId={} orderId={}", driverId, orderId, e);
+        }
+
         return true;
     }
 

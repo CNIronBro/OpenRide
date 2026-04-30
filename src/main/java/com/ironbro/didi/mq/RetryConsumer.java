@@ -11,6 +11,8 @@ import com.ironbro.didi.service.DriverLocationService;
 import com.ironbro.didi.mapper.DriverMapper;
 import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
+import com.ironbro.didi.websocket.WebSocketSessionManager;
+import com.ironbro.didi.websocket.WsMessage;
 import com.rabbitmq.client.Channel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -70,6 +72,7 @@ public class RetryConsumer {
     private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
     private final DriverLocationService locationService;
+    private final WebSocketSessionManager wsSessionManager;
 
     /** 每批同时推送的司机数量（与 DispatchConsumer 保持一致） */
     private static final int BATCH_SIZE = 3;
@@ -250,6 +253,15 @@ public class RetryConsumer {
         int toIdx = Math.min(fromIdx + BATCH_SIZE, candidates.size());
         List<Long> nextBatch = candidates.subList(fromIdx, toIdx);
 
+        // 推送下一批前，先通知乘客"正在重新匹配司机"，改善等待体验
+        // passengerId 即乘客的 user_id，与 WS session 的 userId 一致
+        try {
+            wsSessionManager.sendToUser(order.getPassengerId(),
+                    new WsMessage("DISPATCH_RETRYING", Map.of("orderId", orderId)));
+        } catch (Exception e) {
+            log.warn("WS 推送重试通知失败 orderId={}", orderId, e);
+        }
+
         // 写新批次 SET：key=order:dispatch:batch:{orderId}:{nextBatchIndex}，TTL=PENDING_TTL_SECONDS
         String batchSetKey = "order:dispatch:batch:" + orderId + ":" + nextBatchIndex;
         String[] members = nextBatch.stream().map(String::valueOf).toArray(String[]::new);
@@ -419,6 +431,18 @@ public class RetryConsumer {
         String key = "driver:pending:order:" + driverId;
         // TTL=PENDING_TTL_SECONDS（12s），略大于 10s 批次窗口
         redisTemplate.opsForValue().set(key, String.valueOf(orderId), Duration.ofSeconds(PENDING_TTL_SECONDS));
+
+        // WS 推送派单通知（Redis key 保留作为兜底，WS 失败时司机端轮询仍可感知）
+        // driverId 是 driver.id（司机表主键），WS session 以 userId（user 表主键）索引，需转换
+        try {
+            var driver = driverMapper.selectById(driverId);
+            if (driver != null) {
+                wsSessionManager.sendToUser(driver.getUserId(),
+                        new WsMessage("DISPATCH_NOTIFY", Map.of("orderId", orderId)));
+            }
+        } catch (Exception e) {
+            log.warn("WS 推送派单通知失败（重试链路），依赖司机端轮询兜底 driverId={} orderId={}", driverId, orderId, e);
+        }
     }
 
     /** 更新司机派单统计 */

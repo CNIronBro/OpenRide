@@ -399,6 +399,159 @@ let state = {
 };
 
 // ----------------------------------------------------------------
+// WebSocket 连接管理（第一期）
+// ----------------------------------------------------------------
+let ws = null;
+let wsConnected = false;
+let wsReconnectDelay = 1000;  // 指数退避初始延迟（ms）
+// 已被取消的订单 ID 集合：DISPATCH_CANCELLED 先于 handleDispatchNotify 返回时，
+// 记录在此，handleDispatchNotify 返回后检查，防止弹窗在取消后仍然弹出
+const cancelledOrderIds = new Set();
+let wsPingTimer = null;
+let wsPongTimeout = null;
+
+/**
+ * 建立 WebSocket 连接
+ *
+ * 连接时机：司机上线（toggleOnline online=true）时调用。
+ * 断线时：自动按指数退避重连，避免服务重启时所有客户端同时重连（thundering herd）。
+ */
+function connectWs() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    wsConnected = true;
+    wsReconnectDelay = 1000; // 连接成功，重置退避延迟
+    // WS 在线时停止主动轮询，依赖推送
+    stopPollPendingOrder();
+    startWsHeartbeat();
+    console.log('[WS] 连接建立');
+  };
+
+  ws.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === 'PONG') {
+      // 收到心跳回复，清除超时计时器，连接确认存活
+      clearTimeout(wsPongTimeout);
+      return;
+    }
+
+    if (msg.type === 'DISPATCH_NOTIFY') {
+      // 收到派单推送，触发弹窗（与轮询路径复用同一逻辑）
+      handleDispatchNotify(msg.payload.orderId);
+      return;
+    }
+
+    if (msg.type === 'DISPATCH_CANCELLED') {
+      // 同批订单已被他人接走，立即关闭弹窗并显示原因
+      closeOrderModal('已被他人接走');
+    }
+  };
+
+  ws.onclose = () => {
+    wsConnected = false;
+    stopWsHeartbeat();
+    console.log('[WS] 连接断开，降级为轮询兜底');
+    // 断线后恢复轮询兜底（仅在司机在线时）
+    if (state.isOnline) {
+      stopPollPendingOrder(); // 防止叠加多个 interval
+      startPollPendingOrder();
+    }
+    // 指数退避重连：初始 1s，每次翻倍，上限 30s，加随机抖动防止重连风暴
+    if (state.isOnline) {
+      const jitter = Math.random() * 1000;
+      setTimeout(connectWs, wsReconnectDelay + jitter);
+      wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
+    }
+  };
+
+  ws.onerror = () => {
+    // onerror 后会紧跟 onclose，重连逻辑在 onclose 中处理
+    console.warn('[WS] 连接异常');
+  };
+}
+
+/** 断开 WebSocket 连接（司机下线时调用） */
+function disconnectWs() {
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  wsConnected = false;
+  wsReconnectDelay = 1000;
+  stopWsHeartbeat();
+}
+
+/**
+ * 启动心跳定时器
+ *
+ * 每 25s 发一次 PING（低于大多数 NAT/防火墙的 30-60s 空闲超时）。
+ * 发出 PING 后启动 5s 超时计时器，若未收到 PONG 则认为连接已死，主动关闭触发重连。
+ */
+function startWsHeartbeat() {
+  stopWsHeartbeat();
+  wsPingTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'PING' }));
+      wsPongTimeout = setTimeout(() => {
+        console.warn('[WS] PONG 超时，主动关闭连接触发重连');
+        ws.close();
+      }, 5000);
+    }
+  }, 25000);
+}
+
+function stopWsHeartbeat() {
+  clearInterval(wsPingTimer);
+  clearTimeout(wsPongTimeout);
+  wsPingTimer = null;
+  wsPongTimeout = null;
+}
+
+/**
+ * 处理派单通知（WS 推送和轮询兜底共用此入口）
+ *
+ * 原 pollPendingOrder 中的弹窗逻辑提取为独立函数，
+ * 供 WS onmessage 和轮询两条路径复用。
+ */
+async function handleDispatchNotify(orderId) {
+  // 已有弹窗显示中，忽略（防止重复弹窗）
+  if (state.currentOrderId) return;
+  // orderId 与当前活跃订单不匹配时忽略（幂等）
+  const orderRes = await api('/order/' + orderId + '/driver-view', 'GET');
+  if (!orderRes.ok) return;
+  // 网络请求期间可能已收到 DISPATCH_CANCELLED，cancelledOrderIds 中有记录则不弹窗
+  if (cancelledOrderIds.has(orderId)) {
+    cancelledOrderIds.delete(orderId);
+    return;
+  }
+  state.currentOrderId = orderId;
+  showOrderModal(orderRes.data);
+}
+
+/**
+ * 关闭接单弹窗，支持传入原因文字
+ *
+ * @param {string|null} reason 关闭原因，如"已被他人接走"；null 则静默关闭
+ */
+function closeOrderModal(reason) {
+  clearCountdown();
+  document.getElementById('orderModal').classList.remove('show');
+  state.currentOrderId = null;
+  if (reason) {
+    // 短暂显示原因提示（2s 后自动消失）
+    const el = document.getElementById('statusText');
+    const prev = el.textContent;
+    el.textContent = reason;
+    setTimeout(() => { if (state.isOnline) el.textContent = '在线中，等待接单...'; }, 2000);
+  }
+}
+
+// ----------------------------------------------------------------
 // 页面切换
 // ----------------------------------------------------------------
 function showScreen(id) {
@@ -483,12 +636,16 @@ async function toggleOnline() {
     document.getElementById('statusIcon').textContent = '🟢';
     document.getElementById('statusText').textContent = '在线中，等待接单...';
     document.getElementById('statusText').className = 'status-text online';
+    // 先建立 WS 连接，WS 成功后会停止轮询；WS 失败时 onclose 会启动轮询兜底
+    connectWs();
+    // 同时启动轮询作为初始兜底，WS 建立成功后会自动停止
     startPollPendingOrder();
   } else {
     document.getElementById('statusIcon').textContent = '😴';
     document.getElementById('statusText').textContent = '当前离线，请上线开始接单';
     document.getElementById('statusText').className = 'status-text';
     stopPollPendingOrder();
+    disconnectWs();
   }
 }
 
@@ -508,27 +665,20 @@ async function pollPendingOrder() {
   // 弹窗显示中：检测 pending key 是否已消失（被接单清除或 TTL 过期）
   if (state.currentOrderId) {
     const res = await api('/driver/pending-order', 'GET');
-    // key 消失说明订单已被他人接走或批次窗口已过期，静默关闭弹窗
-    // 不主动查询订单状态，依赖司机主动点击接单时的错误提示来区分原因
     if (!res.ok || !res.data.orderId) {
-      clearCountdown();
-      document.getElementById('orderModal').classList.remove('show');
-      state.currentOrderId = null;
+      // key 消失：WS 在线时已通过 DISPATCH_CANCELLED 推送了原因；
+      // 轮询兜底路径下只能静默关闭（无法区分原因）
+      closeOrderModal(null);
     }
     return;
   }
 
-  // 无当前订单：检查是否有新的待接单通知
+  // 无当前订单：检查是否有新的待接单通知（轮询兜底路径）
   const res = await api('/driver/pending-order', 'GET');
   if (!res.ok || !res.data.orderId) return;
 
-  const orderId = res.data.orderId;
-  // 查询订单详情用于弹窗展示（使用司机端专用查询接口）
-  const orderRes = await api('/order/' + orderId + '/driver-view', 'GET');
-  if (!orderRes.ok) return;
-
-  state.currentOrderId = orderId;
-  showOrderModal(orderRes.data);
+  // 复用 handleDispatchNotify，与 WS 推送路径保持一致
+  await handleDispatchNotify(res.data.orderId);
 }
 
 // ----------------------------------------------------------------
