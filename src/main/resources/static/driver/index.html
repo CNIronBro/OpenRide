@@ -447,8 +447,21 @@ function connectWs() {
     }
 
     if (msg.type === 'DISPATCH_CANCELLED') {
-      // 同批订单已被他人接走，立即关闭弹窗并显示原因
-      closeOrderModal('已被他人接走');
+      const cancelledId = msg.payload && msg.payload.orderId;
+      // 记录取消的 orderId，防止 handleDispatchNotify 的网络请求返回后仍弹窗
+      if (cancelledId) cancelledOrderIds.add(cancelledId);
+      // 若弹窗已弹出（handleDispatchNotify 已完成），直接关闭并显示原因
+      if (state.currentOrderId) {
+        closeOrderModal('已被他人接走');
+      } else {
+        // 弹窗尚未弹出（handleDispatchNotify 还在等网络），
+        // 在 statusText 提前显示原因，handleDispatchNotify 返回后会因 cancelledOrderIds 检查而放弃弹窗
+        const el = document.getElementById('statusText');
+        if (el) {
+          el.textContent = '已被他人接走';
+          setTimeout(() => { if (state.isOnline) el.textContent = '在线中，等待接单...'; }, 2000);
+        }
+      }
     }
   };
 
