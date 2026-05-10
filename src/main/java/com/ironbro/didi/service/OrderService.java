@@ -260,6 +260,14 @@ public class OrderService {
      * @param orderId  订单 ID
      * @param driverId 司机 driver.id（用于鉴权，防止越权操作他人订单）
      */
+    /**
+     * 司机到达接客点（ACCEPTED → PICKING）
+     *
+     * 副作用：向乘客推送 TRIP_STEP_CHANGED(PICKING)，让步骤条立即更新。
+     *
+     * @param orderId  订单 ID
+     * @param driverId 司机 driver.id（用于鉴权，防止越权操作他人订单）
+     */
     @Transactional
     public Order arrive(Long orderId, Long driverId) {
         Order order = getOrderForDriver(orderId, driverId);
@@ -268,6 +276,15 @@ public class OrderService {
         }
         order.setStatus(OrderStatus.PICKING);
         orderMapper.updateById(order);
+
+        // WS 推送步骤变更，让乘客端步骤条立即更新，无需等待轮询
+        try {
+            wsSessionManager.sendToUser(order.getPassengerId(),
+                    new WsMessage("TRIP_STEP_CHANGED", Map.of("orderId", orderId, "status", "PICKING")));
+        } catch (Exception e) {
+            log.warn("WS 推送 TRIP_STEP_CHANGED(PICKING) 失败，依赖乘客端轮询兜底 orderId={}", orderId, e);
+        }
+
         return order;
     }
 
@@ -286,6 +303,15 @@ public class OrderService {
         order.setStatus(OrderStatus.IN_TRIP);
         order.setStartedAt(LocalDateTime.now());
         orderMapper.updateById(order);
+
+        // WS 推送步骤变更
+        try {
+            wsSessionManager.sendToUser(order.getPassengerId(),
+                    new WsMessage("TRIP_STEP_CHANGED", Map.of("orderId", orderId, "status", "IN_TRIP")));
+        } catch (Exception e) {
+            log.warn("WS 推送 TRIP_STEP_CHANGED(IN_TRIP) 失败，依赖乘客端轮询兜底 orderId={}", orderId, e);
+        }
+
         return order;
     }
 
@@ -344,6 +370,20 @@ public class OrderService {
 
         log.info("行程结束 orderId={} driverId={} dist={}km dur={}min actualPrice={} surgeFactor={}",
                 orderId, driverId, distanceKm, durationMin, actualPrice, surgeFactor);
+
+        // WS 推送步骤变更，让乘客端立即跳转支付页，无需等待轮询
+        // payload 含 actualPrice，乘客端可直接展示金额，无需再发一次 GET /order/{id}
+        try {
+            wsSessionManager.sendToUser(order.getPassengerId(),
+                    new WsMessage("TRIP_STEP_CHANGED", Map.of(
+                            "orderId", orderId,
+                            "status", "FINISHED",
+                            "actualPrice", actualPrice
+                    )));
+        } catch (Exception e) {
+            log.warn("WS 推送 TRIP_STEP_CHANGED(FINISHED) 失败，依赖乘客端轮询兜底 orderId={}", orderId, e);
+        }
+
         return order;
     }
 

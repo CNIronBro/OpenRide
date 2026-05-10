@@ -517,7 +517,8 @@ const PASSENGER_ROUTES = {
 
 let currentUserId = null;
 let currentOrderId = null;
-let pollTimer = null;
+let pollTimer = null;      // 位置轮询 timer（行程中 2s，等待中 3s/10s）
+let tripStepTimer = null;  // 步骤轮询 timer（行程中 15s，WS 在线时纯兜底）
 let currentOrder = null;
 let reviewStar = 5;
 let lastEstimatedPrice = null;
@@ -897,13 +898,17 @@ function connectWs() {
     wsConnected = true;
     wsReconnectDelay = 1000;
     startWsHeartbeat();
-    // WS 在线时降低轮询频率至 10s（纯兜底）
+    // WS 在线时降低等待页轮询频率至 10s（纯兜底）
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = setInterval(pollOrderStatus, 10000);
     }
+    // 步骤轮询重连后降回 15s（WS 推送为主，轮询仅兜底）
+    if (tripStepTimer && currentOrderId) {
+      clearInterval(tripStepTimer);
+      tripStepTimer = setInterval(() => pollTripStep(currentOrderId), 15000);
+    }
     // 重连后立即触发一次状态同步，防止断线期间的状态变更被遗漏
-    // WS 是 at-most-once，断线期间的推送消息已丢失，必须主动拉取一次
     pollOrderStatus();
     console.log('[WS] 连接建立');
   };
@@ -923,7 +928,7 @@ function connectWs() {
       if (!currentOrderId || msg.payload.orderId != currentOrderId) return;
       // 停止等待页轮询，切换到行程中页
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-      // 构造最小 order 对象用于立即渲染，完整数据由 pollTripStatus 补全
+      // 构造最小 order 对象用于立即渲染，完整数据由 pollTripStep/pollTripLocation 补全
       const minOrder = {
         id: msg.payload.orderId,
         driverId: msg.payload.driverId,
@@ -936,7 +941,9 @@ function connectWs() {
         destLng:   selectedRoute ? selectedRoute.destLng   : null,
       };
       showTripScreen(minOrder);
-      pollTimer = setInterval(() => pollTripStatus(minOrder.id), 2000);
+      pollTimer = setInterval(() => pollTripLocation(minOrder.id), 2000);
+      const stepInterval = wsConnected ? 15000 : 2000;
+      tripStepTimer = setInterval(() => pollTripStep(minOrder.id), stepInterval);
       return;
     }
 
@@ -955,7 +962,29 @@ function connectWs() {
 
     if (msg.type === 'DISPATCH_RETRYING') {
       if (!currentOrderId || msg.payload.orderId != currentOrderId) return;
+      document.getElementById('waiting-status-text').textContent = '正在重新匹配司机...';
       document.getElementById('w-order-status').textContent = '正在重新匹配司机...';
+    }
+
+    if (msg.type === 'TRIP_STEP_CHANGED') {
+      if (!currentOrderId || msg.payload.orderId != currentOrderId) return;
+      const status = msg.payload.status;
+      // 更新步骤条
+      updateTripSteps(status);
+      // 同步 currentOrder.status，供 focusToggleP 和位置轮询读取
+      if (currentOrder) currentOrder.status = status;
+
+      if (status === 'FINISHED') {
+        // 行程结束：停止所有轮询，跳转支付页
+        // 用 WS payload 中的 actualPrice 直接构造最小 order 对象，避免再发一次 GET /order/{id}
+        stopPolling();
+        disconnectWs();
+        const finishedOrder = Object.assign({}, currentOrder, {
+          status: 'FINISHED',
+          actualPrice: msg.payload.actualPrice
+        });
+        showPaymentScreen(finishedOrder);
+      }
     }
   };
 
@@ -963,10 +992,15 @@ function connectWs() {
     wsConnected = false;
     stopWsHeartbeat();
     console.log('[WS] 连接断开，降级为轮询兜底');
-    // 断线后恢复原有轮询频率（直接操作 pollTimer，不调用 stopPolling()，避免清空地图状态）
+    // 断线后恢复原有轮询频率（直接操作 timer，不调用 stopPolling()，避免清空地图状态）
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = setInterval(pollOrderStatus, 3000);
+    }
+    // 步骤轮询断线后恢复 2s（WS 在线时为 15s 兜底）
+    if (tripStepTimer && currentOrderId) {
+      clearInterval(tripStepTimer);
+      tripStepTimer = setInterval(() => pollTripStep(currentOrderId), 2000);
     }
     // 仅在有活跃订单时才重连，避免无订单状态下无意义重连
     if (currentOrderId) {
@@ -1234,6 +1268,7 @@ function startPolling() {
 
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (tripStepTimer) { clearInterval(tripStepTimer); tripStepTimer = null; }
   // 重置地图动画状态，下次行程重新初始化
   passengerTripMap = null; passengerDriverMarker = null; passengerOriginMarker = null;
   passengerDriverLastPos = null;
@@ -1272,8 +1307,11 @@ async function pollOrderStatus() {
   if (order.status === 'ACCEPTED' || order.status === 'PICKING' || order.status === 'IN_TRIP') {
     stopPolling();
     showTripScreen(order);
-    // 行程中继续轮询（更新步骤条）
-    pollTimer = setInterval(() => pollTripStatus(order.id), 2000);
+    // 位置轮询：2s，保持地图 marker 流畅更新
+    pollTimer = setInterval(() => pollTripLocation(order.id), 2000);
+    // 步骤轮询：WS 在线时 15s 纯兜底，WS 断线时 2s 恢复
+    const stepInterval = wsConnected ? 15000 : 2000;
+    tripStepTimer = setInterval(() => pollTripStep(order.id), stepInterval);
   } else if (order.status === 'FINISHED') {
     stopPolling();
     disconnectWs();
@@ -1311,49 +1349,13 @@ async function showTripScreen(order) {
   showScreen('intrip');
 }
 
-// ---- 轮询行程状态（更新步骤条） ----
-async function pollTripStatus(orderId) {
+// ---- 步骤轮询（WS 在线时 15s 兜底，断线时 2s） ----
+async function pollTripStep(orderId) {
   const r = await api(`/order/${orderId}`);
   if (r.code !== 200) return;
   const order = r.data;
-  // 同步更新 currentOrder，确保 focusToggleP 能读到最新的坐标和状态
   currentOrder = order;
   updateTripSteps(order.status);
-
-  // 轮询司机实时位置，做贴路 RAF 插值动画
-  const locR = await api(`/driver/location/current?orderId=${orderId}`);
-  if (locR.code === 200 && locR.data && locR.data.lat && locR.data.lng) {
-    const { lat, lng, routePoints } = locR.data;
-    const newPos = { lat, lng };
-    // 传入乘客起点坐标，首次初始化时同时显示乘客位置 marker
-    initPassengerTripMap(lat, lng, order.originLat, order.originLng);
-    if (passengerDriverMarker) {
-      if (!passengerDriverLastPos) {
-        // 首次：直接定位，不做动画
-        passengerDriverMarker.setPosition([lng, lat]);
-        passengerDriverLastPos = newPos;
-      } else {
-        // 取消上一个未完成的动画，开始新动画
-        if (passengerDriverRafId) { cancelAnimationFrame(passengerDriverRafId); passengerDriverRafId = null; }
-        const fromPos = passengerDriverLastPos;
-        passengerDriverLastPos = newPos;
-        // 动画时长 = 轮询间隔（2000ms）
-        passengerDriverRafId = animateMarkerPassenger(
-          passengerDriverMarker, fromPos, newPos, routePoints || null, 2000
-        );
-      }
-      // 乘客已上车（IN_TRIP）后隐藏起点 marker；同时隐藏"我的位置"聚焦按钮（乘客已在车上）
-      if (order.status === 'IN_TRIP' || order.status === 'FINISHED') {
-        if (passengerOriginMarker) passengerOriginMarker.hide();
-        // 乘客已上车，聚焦目标切换为目的地
-        const btn = document.getElementById('focusToggleBtnP');
-        if (btn && btn.dataset.target !== 'dest') {
-          btn.dataset.target = 'dest';
-          btn.textContent = '🏁 目的地';
-        }
-      }
-    }
-  }
 
   if (order.status === 'FINISHED') {
     stopPolling();
@@ -1364,6 +1366,46 @@ async function pollTripStatus(orderId) {
     disconnectWs();
     alert('行程已取消。');
     showScreen('home');
+  }
+}
+
+// ---- 位置轮询（始终 2s，与步骤轮询独立） ----
+async function pollTripLocation(orderId) {
+  // 若 currentOrder 坐标缺失（WS 路径的 minOrder 未携带完整坐标），先补全
+  if (!currentOrder || !currentOrder.originLat) {
+    const r = await api(`/order/${orderId}`);
+    if (r.code === 200) currentOrder = r.data;
+  }
+
+  const locR = await api(`/driver/location/current?orderId=${orderId}`);
+  if (locR.code === 200 && locR.data && locR.data.lat && locR.data.lng) {
+    const { lat, lng, routePoints } = locR.data;
+    const newPos = { lat, lng };
+    const originLat = currentOrder ? currentOrder.originLat : null;
+    const originLng = currentOrder ? currentOrder.originLng : null;
+    if (originLat && originLng) initPassengerTripMap(lat, lng, originLat, originLng);
+    if (passengerDriverMarker) {
+      if (!passengerDriverLastPos) {
+        passengerDriverMarker.setPosition([lng, lat]);
+        passengerDriverLastPos = newPos;
+      } else {
+        if (passengerDriverRafId) { cancelAnimationFrame(passengerDriverRafId); passengerDriverRafId = null; }
+        const fromPos = passengerDriverLastPos;
+        passengerDriverLastPos = newPos;
+        passengerDriverRafId = animateMarkerPassenger(
+          passengerDriverMarker, fromPos, newPos, routePoints || null, 2000
+        );
+      }
+      const status = currentOrder ? currentOrder.status : null;
+      if (status === 'IN_TRIP' || status === 'FINISHED') {
+        if (passengerOriginMarker) passengerOriginMarker.hide();
+        const btn = document.getElementById('focusToggleBtnP');
+        if (btn && btn.dataset.target !== 'dest') {
+          btn.dataset.target = 'dest';
+          btn.textContent = '🏁 目的地';
+        }
+      }
+    }
   }
 }
 
