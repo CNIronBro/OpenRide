@@ -99,6 +99,40 @@ public class DispatchScoreService {
     }
 
     /**
+     * 计算单个候选司机的评分（供 KM 矩阵构造使用）
+     *
+     * 与 score() 使用相同的公式，但直接返回浮点分值而非排序后的 ID 列表，
+     * 便于 GlobalDispatchScheduler 在构造 n×m 收益矩阵时逐格填值。
+     *
+     * @param candidate  候选司机（含距离信息）
+     * @param maxDistance 召回半径（公里），用于归一化距离分
+     * @return 综合评分（0.0 ~ 1.0）
+     */
+    public double scoreOne(CandidateDriver candidate, double maxDistance) {
+        Driver driver = candidate.driver();
+        double distKm = candidate.distanceKm();
+
+        double distanceScore = 1.0 - Math.min(distKm / maxDistance, 1.0);
+
+        double idleMinutes = 0;
+        if (driver.getIdleSince() != null) {
+            idleMinutes = Duration.between(driver.getIdleSince(), LocalDateTime.now()).toMinutes();
+        }
+        double idleScore = Math.min(idleMinutes / MAX_IDLE_MINUTES, 1.0);
+
+        double acceptRateScore = driver.getAcceptRate() != null
+                ? driver.getAcceptRate().doubleValue() : 0.5;
+
+        int dispatchCount = driver.getDispatchCountToday() != null ? driver.getDispatchCountToday() : 0;
+        double dispatchPenalty = 1.0 - Math.min(dispatchCount / MAX_DISPATCH_COUNT, 1.0);
+
+        return W_DISTANCE * distanceScore
+                + W_IDLE * idleScore
+                + W_ACCEPT_RATE * acceptRateScore
+                + W_DISPATCH_PENALTY * dispatchPenalty;
+    }
+
+    /**
      * 候选司机数据（GEO 召回结果 + 司机详情）
      *
      * @param driver     司机实体（含 acceptRate、idleSince、dispatchCountToday）
