@@ -1,26 +1,23 @@
 package com.ironbro.didi.job;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.ironbro.didi.config.RabbitMqConfig;
 import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.entity.OrderDispatchLog;
 import com.ironbro.didi.enums.DispatchAction;
 import com.ironbro.didi.enums.OrderStatus;
 import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
+import com.ironbro.didi.service.dispatch.DispatchWaitingPool;
 import com.xxl.job.core.handler.annotation.XxlJob;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -36,7 +33,7 @@ import java.util.concurrent.TimeUnit;
  * 补偿策略：
  * - 扫描 status=DISPATCHING AND updated_at < NOW()-5min 的订单
  * - 检查 Redis 中是否有正在处理的标记（lock:dispatch:{orderId}）
- * - 无标记则重新触发派单（发送消息到 dispatch.queue）
+ * - 无标记则重新写入等待池（order:waiting:pool），由 GlobalDispatchScheduler 下一个 tick 调度
  * - 若 dispatch_retry_count 超过最大值（10次），直接取消订单
  *
  * 幂等保证（阶段 7 对接）：
@@ -61,9 +58,9 @@ public class ZombieOrderScanJob {
 
     private final OrderMapper orderMapper;
     private final OrderDispatchLogMapper dispatchLogMapper;
-    private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
     private final RedissonClient redissonClient;
+    private final DispatchWaitingPool waitingPool;
 
     /**
      * 扫描并补偿僵尸订单
@@ -141,7 +138,7 @@ public class ZombieOrderScanJob {
                 // 超过最大重试次数，直接取消订单
                 cancelZombieOrder(freshOrder, "派单超时，自动取消（补偿任务）");
             } else {
-                // 重新触发派单：发送消息到 dispatch.queue，MQ 链路会重新执行召回+评分+推送
+                // 重新写入等待池，GlobalDispatchScheduler 下一个 tick 会取出并调度
                 retriggerDispatch(freshOrder);
             }
 
@@ -160,8 +157,8 @@ public class ZombieOrderScanJob {
     /**
      * 重新触发派单
      *
-     * 向 dispatch.queue 发送派单消息，MQ 消费者（DispatchConsumer）会重新执行
-     * GEO 召回 → 评分 → 推送 → 延迟重试的完整流程。
+     * 将订单重新写入等待池，由 GlobalDispatchScheduler 在下一个 tick 统一调度。
+     * 不再直接发 MQ，与正常下单流程保持一致。
      *
      * 同时递增 dispatch_retry_count，用于后续判断是否超过最大重试次数。
      */
@@ -171,24 +168,14 @@ public class ZombieOrderScanJob {
                 order.getDispatchRetryCount() != null ? order.getDispatchRetryCount() + 1 : 1);
         orderMapper.updateById(order);
 
-        // 重新发送派单消息
-        Map<String, Object> msg = new HashMap<>();
-        msg.put("orderId", order.getId());
-        msg.put("originLat", order.getOriginLat());
-        msg.put("originLng", order.getOriginLng());
-        msg.put("city", "default");
-
-        rabbitTemplate.convertAndSend(
-                RabbitMqConfig.DISPATCH_EXCHANGE,
-                RabbitMqConfig.ROUTING_DISPATCH_NEW,
-                msg
-        );
+        // 重新写入等待池，GlobalDispatchScheduler 下一个 tick（最多 2s）会取出并调度
+        waitingPool.add(order.getId());
 
         // 8.6 记录补偿日志
         saveDispatchLog(order.getId(), null, DispatchAction.COMPENSATED,
-                "僵尸订单补偿，重新触发派单，retryCount=" + order.getDispatchRetryCount());
+                "僵尸订单补偿，重新写入等待池，retryCount=" + order.getDispatchRetryCount());
 
-        log.info("[xxl-job] 僵尸订单重新触发派单 orderId={} retryCount={}", order.getId(), order.getDispatchRetryCount());
+        log.info("[xxl-job] 僵尸订单重新写入等待池 orderId={} retryCount={}", order.getId(), order.getDispatchRetryCount());
     }
 
     /**

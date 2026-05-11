@@ -2,16 +2,15 @@ package com.ironbro.didi.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ironbro.didi.common.BizException;
-import com.ironbro.didi.config.RabbitMqConfig;
 import com.ironbro.didi.entity.Driver;
 import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.enums.DriverStatus;
 import com.ironbro.didi.enums.OrderStatus;
 import com.ironbro.didi.mapper.DriverMapper;
 import com.ironbro.didi.mapper.OrderMapper;
+import com.ironbro.didi.service.dispatch.DispatchWaitingPool;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,7 +22,6 @@ import java.time.Duration;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,16 +30,16 @@ import java.util.stream.Collectors;
 /**
  * 订单服务
  *
- * 阶段 5 职责：
- * 1. 乘客下单：写库 + 发送派单消息到 dispatch.queue
+ * 职责：
+ * 1. 乘客下单：写库 + 事务提交后写入 Redis 等待池（由 GlobalDispatchScheduler 统一调度）
  * 2. 查询订单状态（供乘客端轮询）
+ * 3. 接单（CAS 乐观锁）、行程状态流转、取消等接口
  *
- * 阶段 6 将在此类中补充：接单（CAS）、行程状态流转、取消等接口。
- *
- * 事务说明：
- * createOrder 使用 @Transactional，保证写库和发 MQ 消息的原子性。
- * 注意：Spring 的 @Transactional 无法保证 MQ 消息与数据库的强一致性（两阶段提交），
- * 但在本项目规模下，先写库再发 MQ，若 MQ 发送失败，xxl-job 补偿任务会兜底重新触发派单。
+ * 派单入口变更说明（自适应全局派单改造）：
+ * 原方案：createOrder 事务提交后直接发 MQ 到 dispatch.queue，DispatchConsumer 立即处理。
+ * 新方案：createOrder 事务提交后写入 order:waiting:pool（Redis ZSET），
+ *         GlobalDispatchScheduler 每 2s 统一取出所有待派订单，根据供需比决定 KM 或贪心匹配。
+ * 好处：同一 tick 内多个订单可参与全局最优匹配，避免先到订单抢走后到订单唯一合适司机。
  */
 @Slf4j
 @Service
@@ -50,10 +48,10 @@ public class OrderService {
 
     private final OrderMapper orderMapper;
     private final DriverMapper driverMapper;
-    private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
     private final PricingService pricingService;
     private final WebSocketSessionManager wsSessionManager;
+    private final DispatchWaitingPool waitingPool;
 
     /**
      * 乘客下单
@@ -61,11 +59,15 @@ public class OrderService {
      * 业务流程：
      * 1. 构建订单实体，初始状态为 DISPATCHING（直接进入派单，跳过 PENDING 中间态）
      * 2. 写入数据库
-     * 3. 发送派单消息到 dispatch.queue，消息体携带 orderId 和下单位置
+     * 3. 事务提交后将 orderId 写入 Redis 等待池（order:waiting:pool ZSET）
      *
      * 状态说明：
-     * 直接设为 DISPATCHING 而非 PENDING，是因为下单和发 MQ 在同一事务中完成，
-     * 不存在"已下单但未进入派单队列"的中间状态需要区分。
+     * 直接设为 DISPATCHING 而非 PENDING，是因为下单和写等待池在同一事务提交后完成，
+     * 不存在"已下单但未进入派单流程"的中间状态需要区分。
+     *
+     * 派单入口说明：
+     * 不再直接发 MQ，改为写入等待池。GlobalDispatchScheduler 每 2s 触发一次 tick，
+     * 统一取出等待池中所有订单参与全局匹配，最多延迟约 2s 开始派单。
      *
      * @param passengerId 乘客 user_id
      * @param req         下单请求参数
@@ -91,27 +93,17 @@ public class OrderService {
 
         orderMapper.insert(order);
 
-        // 必须在事务提交后再发 MQ 消息，否则消费者可能在事务提交前查询订单，导致读不到数据
-        // 场景：@Transactional 事务内直接发 MQ，消息极快被消费，但 INSERT 尚未提交，
-        //       DispatchConsumer.selectById 返回 null，订单被误判为"不在派单中状态"而跳过
-        // TransactionSynchronizationManager.registerSynchronization 注册事务提交后回调，
-        // afterCommit() 在当前事务成功提交后才执行，保证消费者能读到已提交的订单数据
+        // 必须在事务提交后再写入等待池，否则调度器可能在事务提交前读到 orderId，
+        // 查询订单时返回 null，导致订单被误判为无效而从等待池移除。
+        // afterCommit() 在当前事务成功提交后才执行，保证调度器能读到已持久化的订单数据。
         final Long orderId = order.getId();
-        final Map<String, Object> msg = new HashMap<>();
-        msg.put("orderId", orderId);
-        msg.put("originLat", req.originLat());
-        msg.put("originLng", req.originLng());
-        msg.put("city", req.city());
 
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                // 投递到 dispatch.exchange，routing key=dispatch.new → dispatch.queue
-                rabbitTemplate.convertAndSend(
-                        RabbitMqConfig.DISPATCH_EXCHANGE,
-                        RabbitMqConfig.ROUTING_DISPATCH_NEW,
-                        msg
-                );
+                // 写入等待池，GlobalDispatchScheduler 每 2s 取出所有待派订单统一调度
+                // 不再直接发 MQ，派单入口从"订单到达立即触发"改为"tick 统一批量处理"
+                waitingPool.add(orderId);
             }
         });
 
@@ -426,11 +418,20 @@ public class OrderService {
             throw new BizException(400, "订单已结束，无法取消");
         }
 
+        // 记录取消前的状态，用于后续判断是否需要从等待池移除
+        OrderStatus prevStatus = order.getStatus();
+
         order.setStatus(OrderStatus.CANCELLED);
         order.setCancelBy(cancelBy);
         order.setCancelReason(reason);
         order.setCancelledAt(LocalDateTime.now());
         orderMapper.updateById(order);
+
+        // 若订单处于派单中，从等待池移除，防止调度器在下一个 tick 再次尝试派单
+        // CancelConsumer 处理系统自动取消时也会调用 waitingPool.remove，两处均需覆盖
+        if (prevStatus == OrderStatus.DISPATCHING) {
+            waitingPool.remove(orderId);
+        }
 
         // 若司机已接单，取消后恢复司机为 ONLINE
         if (order.getDriverId() != null) {

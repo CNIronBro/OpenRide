@@ -9,6 +9,7 @@ import com.ironbro.didi.enums.DispatchAction;
 import com.ironbro.didi.enums.OrderStatus;
 import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
+import com.ironbro.didi.service.dispatch.DispatchWaitingPool;
 import com.ironbro.didi.websocket.WebSocketSessionManager;
 import com.ironbro.didi.websocket.WsMessage;
 import com.rabbitmq.client.Channel;
@@ -43,6 +44,7 @@ public class CancelConsumer {
     private final OrderDispatchLogMapper dispatchLogMapper;
     private final ObjectMapper objectMapper;
     private final WebSocketSessionManager wsSessionManager;
+    private final DispatchWaitingPool waitingPool;
 
     /**
      * 消费取消消息
@@ -104,6 +106,10 @@ public class CancelConsumer {
         order.setCancelReason(reason);
         order.setCancelledAt(LocalDateTime.now());
         orderMapper.updateById(order);
+
+        // 从等待池移除该订单，防止 GlobalDispatchScheduler 在下一个 tick 再次尝试派单
+        // 场景：订单刚进入等待池但尚未被调度器取出时，系统触发了取消（如全局超时）
+        waitingPool.remove(orderId);
 
         // 记录取消日志
         OrderDispatchLog dispatchLog = new OrderDispatchLog();
