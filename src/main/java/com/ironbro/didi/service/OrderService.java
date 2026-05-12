@@ -33,7 +33,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * 订单服务
@@ -160,7 +159,9 @@ public class OrderService {
      * 接单成功后副作用：
      * 1. 司机状态改为 IN_TRIP，从 GEO 在线集合移除（不再参与新派单）
      * 2. 清除接单司机的待接单通知 key（driver:pending:order:{driverId}）
-     * 3. 清除同批其他司机的待接单通知 key
+     *
+     * 阶段 6 说明：新方案每次只推 1 个司机，不再有"同批其他司机"需要通知，
+     * 原批次清理逻辑（batch:index / batch:set）已废弃。
      *
      * @param orderId  订单 ID
      * @param driverId 司机的 driver.id（非 user_id）
@@ -183,7 +184,8 @@ public class OrderService {
         int rows = orderMapper.updateById(order);
         if (rows == 0) {
             // 乐观锁冲突：重新查询订单状态，给出更精确的错误提示
-            // 批量派单场景下，同批多个司机并发接单，N-1 个会走到这里
+            // 新方案每次只推 1 个司机，正常不会触发并发接单；CAS 作为防御性保障，
+            // 防止极端情况下（如网络重试、补偿重推）同一订单被多个司机同时接单
             Order current = orderMapper.selectById(orderId);
             if (current != null && current.getStatus() == OrderStatus.ACCEPTED) {
                 throw new BizException(409, "订单已被他人接走");
@@ -191,46 +193,9 @@ public class OrderService {
             throw new BizException(409, "订单已被接单或已取消");
         }
 
-        // 接单成功：清除同批其他司机的 pending key，让其弹窗尽快关闭
-        // 读取当前批次号，再读批次 SET，过滤掉接单司机自身，批量删除其余司机的 pending key
-        // 注意：此操作允许最终一致——批次 SET 可能已 TTL 过期，此时依赖 pending key 自身 12s TTL 自然过期兜底
-        String batchIndexKey = "order:dispatch:batch:index:" + orderId;
-        String batchIndexStr = redisTemplate.opsForValue().get(batchIndexKey);
-        if (batchIndexStr != null) {
-            String batchSetKey = "order:dispatch:batch:" + orderId + ":" + batchIndexStr;
-            Set<String> batchMembers = redisTemplate.opsForSet().members(batchSetKey);
-            if (batchMembers != null && !batchMembers.isEmpty()) {
-                List<String> keysToDelete = batchMembers.stream()
-                        .filter(id -> !id.equals(String.valueOf(driverId)))
-                        .map(id -> "driver:pending:order:" + id)
-                        .collect(Collectors.toList());
-                if (!keysToDelete.isEmpty()) {
-                    // delete(Collection) 底层发送单条 DEL key1 key2 ... 命令，比逐个删除高效
-                    redisTemplate.delete(keysToDelete);
-                    log.info("清除同批其他司机 pending key orderId={} keys={}", orderId, keysToDelete);
-                }
-
-                // WS 推送：通知同批其他司机立即关闭弹窗，并显示"已被他人接走"
-                // 在已有的批次成员遍历基础上追加，不重复查询 Redis
-                // 每个 driverId 是 driver.id，需转换为 userId 才能找到对应的 WS session
-                batchMembers.stream()
-                        .filter(id -> !id.equals(String.valueOf(driverId)))
-                        .forEach(id -> {
-                            try {
-                                Driver otherDriver = driverMapper.selectById(Long.parseLong(id));
-                                if (otherDriver != null) {
-                                    wsSessionManager.sendToUser(otherDriver.getUserId(),
-                                            new WsMessage("DISPATCH_CANCELLED",
-                                                    Map.of("orderId", orderId, "reason", "TAKEN")));
-                                }
-                            } catch (Exception e) {
-                                log.warn("WS 推送同批司机关闭弹窗失败 driverId={} orderId={}", id, orderId, e);
-                            }
-                        });
-            }
-        }
-
         // 接单成功：更新司机状态为 IN_TRIP，从 GEO 在线集合移除
+        // 阶段 6 说明：新方案每次只推 1 个司机（GlobalDispatchScheduler 单司机推送），
+        // 不再有"同批其他司机"需要通知，原批次清理逻辑（batch:index / batch:set）已废弃。
         Driver driver = driverMapper.selectById(driverId);
         if (driver != null) {
             driver.setStatus(DriverStatus.IN_TRIP);

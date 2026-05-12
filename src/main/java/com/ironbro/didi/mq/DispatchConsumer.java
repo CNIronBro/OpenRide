@@ -111,6 +111,12 @@ public class DispatchConsumer {
     /**
      * 消费派单消息
      *
+     * ⚠️ 阶段 6 废弃说明：
+     * 自适应全局派单改造完成后，订单创建不再发消息到 dispatch.queue，
+     * 改为写入 Redis 等待池（order:waiting:pool），由 GlobalDispatchScheduler 每 2s 统一调度。
+     * @RabbitListener 已注释，dispatch.queue 不再有新消息进入。
+     * 保留此类代码作为历史参考，不删除。
+     *
      * 消息体格式（Map）：
      * {
      *   "orderId":   Long,
@@ -132,7 +138,8 @@ public class DispatchConsumer {
      *                失败时进死信队列便于排查，幂等重复时主动 ACK 丢弃避免重入队列。
      *                注意：Channel 操作会抛 IOException，因此方法签名需声明 throws IOException
      */
-    @RabbitListener(queues = RabbitMqConfig.DISPATCH_QUEUE)
+    // @RabbitListener(queues = RabbitMqConfig.DISPATCH_QUEUE)
+    // 阶段 6 废弃：新方案由 GlobalDispatchScheduler 替代 DispatchConsumer 的初始派单职责
     public void onDispatch(Message message, Channel channel) throws IOException {
         long deliveryTag = message.getMessageProperties().getDeliveryTag();//消息唯一序号。
         Map<String, Object> body;
