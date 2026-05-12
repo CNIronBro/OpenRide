@@ -1,16 +1,23 @@
 package com.ironbro.didi.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ironbro.didi.common.BizException;
+import com.ironbro.didi.config.RabbitMqConfig;
 import com.ironbro.didi.entity.Driver;
 import com.ironbro.didi.entity.Order;
+import com.ironbro.didi.entity.OrderDispatchLog;
+import com.ironbro.didi.enums.DispatchAction;
 import com.ironbro.didi.enums.DriverStatus;
 import com.ironbro.didi.enums.OrderStatus;
 import com.ironbro.didi.mapper.DriverMapper;
+import com.ironbro.didi.mapper.OrderDispatchLogMapper;
 import com.ironbro.didi.mapper.OrderMapper;
 import com.ironbro.didi.service.dispatch.DispatchWaitingPool;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +29,7 @@ import java.time.Duration;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,6 +60,9 @@ public class OrderService {
     private final PricingService pricingService;
     private final WebSocketSessionManager wsSessionManager;
     private final DispatchWaitingPool waitingPool;
+    private final RabbitTemplate rabbitTemplate;
+    private final ObjectMapper objectMapper;
+    private final OrderDispatchLogMapper dispatchLogMapper;
 
     /**
      * 乘客下单
@@ -377,6 +388,222 @@ public class OrderService {
         }
 
         return order;
+    }
+
+    /**
+     * 司机主动拒单（阶段 4）
+     *
+     * 业务流程：
+     * 1. 校验当前司机确实持有该订单的 pending 通知（driver:pending:order:{driverId} 存在且值为 orderId）
+     * 2. 清除当前司机的 pending key，释放该司机
+     * 3. 递增版本号（order:dispatch:version:{orderId}），使当前已发出的延迟消息失效
+     *    RetryConsumer 消费时会校验版本号，版本号不一致则忽略（阶段 5 改造后生效）
+     * 4. 从候选列表取下一个未被推送过的司机，立即推送
+     * 5. 若候选耗尽，发取消消息
+     *
+     * 即时重推的必要性：
+     * 新方案每次只推 1 个司机，若拒单后不即时处理，乘客需等待整个 10s 超时窗口才能推下一个司机。
+     * 即时重推确保拒单场景下的等待时间与批量方案无实质差距。
+     *
+     * @param orderId  订单 ID
+     * @param driverId 拒单司机的 driver.id（非 user_id）
+     */
+    public void rejectOrder(Long orderId, Long driverId) {
+        // 4.2 校验：当前司机确实持有该订单的 pending 通知
+        // driver:pending:order:{driverId} 的值应为 orderId 字符串
+        String pendingKey = "driver:pending:order:" + driverId;
+        String pendingOrderId = redisTemplate.opsForValue().get(pendingKey);
+        if (pendingOrderId == null || !pendingOrderId.equals(String.valueOf(orderId))) {
+            // pending key 不存在或已过期（10s TTL），或值不匹配（司机持有的是另一个订单的通知）
+            // 此时拒单无意义，直接返回（不报错，前端弹窗已关闭即可）
+            log.info("拒单校验失败：司机未持有该订单的 pending 通知 driverId={} orderId={} pendingOrderId={}",
+                    driverId, orderId, pendingOrderId);
+            return;
+        }
+
+        // 校验订单状态：只有 DISPATCHING 状态才需要处理拒单
+        // 若订单已被其他司机接单（ACCEPTED）或已取消，直接返回，避免产生无效操作
+        Order order = orderMapper.selectById(orderId);
+        if (order == null || order.getStatus() != OrderStatus.DISPATCHING) {
+            log.info("拒单时订单状态已变更，忽略 orderId={} status={}",
+                    orderId, order != null ? order.getStatus() : "null");
+            // 仍需清除 pending key，避免司机端轮询到已无效的通知
+            redisTemplate.delete(pendingKey);
+            return;
+        }
+
+        // 4.3 清除当前司机的 pending key，释放该司机（不再参与本订单的等待窗口）
+        redisTemplate.delete(pendingKey);
+
+        // 记录拒单日志
+        saveDispatchLog(orderId, driverId, DispatchAction.REJECTED, "司机主动拒单，即时重推下一候选");
+
+        // 4.6 原子递增版本号，使当前已发出的延迟消息失效
+        // 使用 Redis INCR 命令（原子操作），避免 GET+SET 的 TOCTOU 竞态：
+        // 若两个请求并发（如司机快速双击），GET+SET 会导致两次都读到旧值，版本号只递增 1 而非 2。
+        // INCR 保证每次调用都严格递增，并发安全。
+        // RetryConsumer 消费时会校验版本号，版本号不一致则忽略（阶段 5 改造后完全生效）
+        String versionKey = "order:dispatch:version:" + orderId;
+        Long newVersion = redisTemplate.opsForValue().increment(versionKey);
+        // 确保版本号 key 有 TTL（INCR 在 key 不存在时会创建，但不设置 TTL）
+        // 仅在首次创建时设置 TTL，避免每次拒单都重置过期时间
+        if (newVersion != null && newVersion == 1) {
+            redisTemplate.expire(versionKey, Duration.ofMinutes(10));
+        }
+        log.info("拒单版本号递增 orderId={} newVersion={}", orderId, newVersion);
+
+        // 4.4 读取候选列表
+        String candidatesKey = "order:candidates:" + orderId;
+        String candidatesJson = redisTemplate.opsForValue().get(candidatesKey);
+        if (candidatesJson == null) {
+            // 候选列表已过期（TTL 10min），无法即时重推
+            // 不主动取消订单，让已发出的延迟消息自然到期，由 RetryConsumer 走扩圈逻辑
+            log.warn("拒单后候选列表已过期，等待 RetryConsumer 扩圈兜底 orderId={}", orderId);
+            return;
+        }
+
+        List<Long> candidates;
+        try {
+            candidates = objectMapper.readValue(candidatesJson, new TypeReference<>() {});
+        } catch (Exception e) {
+            log.error("候选列表解析失败 orderId={}", orderId, e);
+            return;
+        }
+
+        // 4.5 取下一个未被推送过的候选司机
+        // 跳过 order:dispatched:drivers:{orderId} 中已有的司机（防重推）
+        Set<String> alreadyDispatched = redisTemplate.opsForSet()
+                .members("order:dispatched:drivers:" + orderId);
+
+        Long nextDriverId = null;
+        int nextIndex = -1;
+        for (int i = 0; i < candidates.size(); i++) {
+            Long candidateId = candidates.get(i);
+            boolean alreadySent = alreadyDispatched != null
+                    && alreadyDispatched.contains(String.valueOf(candidateId));
+            if (!alreadySent) {
+                nextDriverId = candidateId;
+                nextIndex = i;
+                break;
+            }
+        }
+
+        if (nextDriverId == null) {
+            // 候选列表内所有司机均已推送过，无法即时重推
+            // 不主动取消订单：RetryConsumer 的延迟消息 10s 后到期，会走 handleExhausted 扩圈逻辑，
+            // 扩圈后若仍无司机才最终取消。拒单即时重推只负责在现有候选列表内快速切换，
+            // 扩圈和最终取消属于超时重试的职责，不在此处越权处理。
+            log.info("拒单后当前候选列表已耗尽，等待 RetryConsumer 扩圈 orderId={}", orderId);
+            return;
+        }
+
+        // 4.6 有下一个候选：立即推送
+        if (newVersion == null) newVersion = 1L; // 防御性兜底，正常不会为 null
+        pushNextDriver(orderId, nextDriverId, nextIndex, newVersion.intValue());
+        log.info("拒单即时重推成功 orderId={} prevDriverId={} nextDriverId={} nextIndex={}",
+                orderId, driverId, nextDriverId, nextIndex);
+    }
+
+    /**
+     * 推送下一个候选司机（拒单即时重推的核心推送逻辑）
+     *
+     * 与 GlobalDispatchScheduler.pushMatchResult 类似，但不从等待池移除订单（订单已不在等待池中）。
+     *
+     * 执行步骤：
+     * 1. 写 driver:pending:order:{driverId}（TTL=10s）
+     * 2. 更新 order:dispatch:current:index:{orderId}
+     * 3. 将司机加入 order:dispatched:drivers:{orderId}（防重推）
+     * 4. 递增 order:dispatch:batch:index:{orderId}，使现有 RetryConsumer 的幂等校验感知到新推送
+     *    （阶段 5 改造 RetryConsumer 后改为版本号校验，此 key 可废弃）
+     * 5. 发延迟消息（x-delay=10s），携带新 batchIndex 和版本号
+     * 6. WS 推送派单通知
+     *
+     * @param orderId    订单 ID
+     * @param driverId   下一个候选司机 ID
+     * @param index      该司机在候选列表中的索引
+     * @param version    当前版本号（已递增后的值），写入延迟消息供阶段 5 改造后的 RetryConsumer 校验
+     */
+    private void pushNextDriver(Long orderId, Long driverId, int index, int version) {
+        // 写司机待接单通知（TTL=10s，与派单窗口一致）
+        redisTemplate.opsForValue().set(
+                "driver:pending:order:" + driverId,
+                String.valueOf(orderId),
+                Duration.ofSeconds(10));
+
+        // 更新当前推送司机在候选列表中的索引
+        redisTemplate.opsForValue().set(
+                "order:dispatch:current:index:" + orderId,
+                String.valueOf(index),
+                Duration.ofMinutes(10));
+
+        // 将司机加入已推送集合，防止重复推送
+        redisTemplate.opsForSet().add("order:dispatched:drivers:" + orderId, String.valueOf(driverId));
+        redisTemplate.expire("order:dispatched:drivers:" + orderId, Duration.ofMinutes(10));
+
+        // 递增 batch:index，使现有 RetryConsumer 的幂等校验感知到这是一次新推送。
+        // 背景：RetryConsumer 当前用 msgBatchIndex == currentBatchIndex 做幂等校验。
+        // GlobalDispatchScheduler 初始写 batch:index=0，若拒单后仍发 batchIndex=0 的延迟消息，
+        // RetryConsumer 消费时校验通过，会再次触发重试推送，产生多余操作。
+        // 递增 batch:index 后，新延迟消息携带 newBatchIndex，RetryConsumer 消费时校验一致，
+        // 但此时已是新一轮推送的超时检查，行为正确。
+        // 阶段 5 改造 RetryConsumer 后改为版本号校验，此 key 可废弃。
+        String batchIndexKey = "order:dispatch:batch:index:" + orderId;
+        Long newBatchIndex = redisTemplate.opsForValue().increment(batchIndexKey);
+        if (newBatchIndex != null && newBatchIndex == 1) {
+            // key 不存在时 INCR 从 0 开始，首次创建时设置 TTL
+            redisTemplate.expire(batchIndexKey, Duration.ofMinutes(10));
+        }
+        int batchIndex = newBatchIndex != null ? newBatchIndex.intValue() : 1;
+
+        // 发延迟消息（x-delay=10s），携带新 batchIndex 和版本号
+        Map<String, Object> retryMsg = new HashMap<>();
+        retryMsg.put("orderId", orderId);
+        retryMsg.put("batchIndex", batchIndex);  // 与 Redis 中的 batch:index 一致，RetryConsumer 幂等校验用
+        retryMsg.put("version", version);         // 阶段 5 改造后使用
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_RETRY,
+                retryMsg,
+                m -> {
+                    m.getMessageProperties().setHeader("x-delay", 10_000);
+                    return m;
+                });
+
+        // WS 推送派单通知（Redis key 作为兜底，WS 失败时司机端轮询仍可感知）
+        try {
+            Driver driver = driverMapper.selectById(driverId);
+            if (driver != null) {
+                wsSessionManager.sendToUser(driver.getUserId(),
+                        new WsMessage("DISPATCH_NOTIFY", Map.of("orderId", orderId)));
+            }
+        } catch (Exception e) {
+            log.warn("WS 推送拒单重推通知失败，依赖司机端轮询兜底 driverId={} orderId={}", driverId, orderId, e);
+        }
+
+        saveDispatchLog(orderId, driverId, DispatchAction.DISPATCHED,
+                "拒单即时重推 index=" + index + " batchIndex=" + batchIndex + " version=" + version);
+    }
+
+    /** 发送取消消息到 cancel.queue */
+    private void sendCancelMessage(Long orderId, String reason) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("orderId", orderId);
+        msg.put("reason", reason);
+        rabbitTemplate.convertAndSend(
+                RabbitMqConfig.DISPATCH_EXCHANGE,
+                RabbitMqConfig.ROUTING_DISPATCH_CANCEL,
+                msg);
+    }
+
+    /** 记录派单日志 */
+    private void saveDispatchLog(Long orderId, Long driverId, DispatchAction action, String remark) {
+        OrderDispatchLog logEntry = new OrderDispatchLog();
+        logEntry.setOrderId(orderId);
+        logEntry.setDriverId(driverId);
+        logEntry.setAction(action);
+        logEntry.setRemark(remark);
+        logEntry.setCreatedAt(LocalDateTime.now());
+        dispatchLogMapper.insert(logEntry);
     }
 
     /**

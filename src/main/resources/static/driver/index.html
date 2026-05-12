@@ -723,10 +723,22 @@ function clearCountdown() {
   if (state.countdownTimer) { clearInterval(state.countdownTimer); state.countdownTimer = null; }
 }
 
-function rejectOrder() {
+async function rejectOrder() {
   clearCountdown();
   document.getElementById('orderModal').classList.remove('show');
+  const orderId = state.currentOrderId;
   state.currentOrderId = null;
+
+  // 调用后端拒单接口，触发即时重推下一个候选司机
+  // 原来只是前端静默关闭弹窗，现在通知后端，避免乘客等待整个 10s 超时窗口
+  if (orderId) {
+    try {
+      await api('/order/' + orderId + '/reject', 'POST');
+    } catch (e) {
+      // 拒单接口失败不影响前端关闭弹窗，后端 RetryConsumer 会在 10s 后兜底重试
+      console.warn('[reject] 拒单接口调用失败，依赖 RetryConsumer 兜底', e);
+    }
+  }
 }
 
 async function acceptOrder() {

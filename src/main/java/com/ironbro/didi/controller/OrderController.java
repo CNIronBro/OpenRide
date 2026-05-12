@@ -140,6 +140,25 @@ public class OrderController {
         return Result.ok();
     }
 
+    /**
+     * 司机主动拒单（阶段 4）
+     *
+     * 拒单后立即同步推送候选列表中下一个司机，不等延迟消息超时。
+     * 原来前端"忽略"按钮只是静默关闭弹窗，现在改为调用此接口，
+     * 确保拒单场景下乘客等待时间不因 10s 超时窗口而延长。
+     *
+     * 校验：当前司机必须持有该订单的 pending 通知（driver:pending:order:{driverId} 存在且值为 orderId）。
+     * 若 pending key 已过期（10s TTL），接口静默成功（弹窗已关闭，无需报错）。
+     */
+    @PostMapping("/{id}/reject")
+    public Result<Void> reject(@PathVariable Long id, HttpSession session) {
+        Long userId = SessionUtils.getUserId(session);
+        if (userId == null) throw new BizException(401, "请先登录");
+        Long driverId = driverService.getDriverByUserId(userId).getId();
+        orderService.rejectOrder(id, driverId);
+        return Result.ok();
+    }
+
     /** 从 session 中解析司机 driver.id（行程操作公共方法） */
     private Long getDriverId(HttpSession session) {
         Long userId = SessionUtils.getUserId(session);
