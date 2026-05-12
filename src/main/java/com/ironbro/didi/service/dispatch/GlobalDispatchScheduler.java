@@ -470,29 +470,27 @@ public class GlobalDispatchScheduler {
      * 执行步骤：
      * 1. 写 driver:pending:order:{driverId}（TTL=10s），司机端轮询此 key 感知新订单
      * 2. 写 order:dispatch:current:index:{orderId}，记录当前推送司机在候选列表中的索引
-     *    供阶段 4 拒单接口和阶段 5 RetryConsumer 改造后使用
-     * 3. 写 order:dispatch:version:{orderId}，推送版本号（初始为 0）
-     *    阶段 4 拒单时递增，RetryConsumer 消费时校验版本号实现幂等
-     * 4. 写 order:dispatch:batch:index:{orderId}=0，兼容现有 RetryConsumer 的幂等校验逻辑
-     *    阶段 5 改造 RetryConsumer 后此 key 可废弃
-     * 5. 将司机加入 order:dispatched:drivers:{orderId}，防止重复推送
-     * 6. 发延迟消息到 dispatch.retry.queue（x-delay=10s），10s 后 RetryConsumer 检查接单状态
-     * 7. 从等待池移除该订单（已进入派单流程，不再参与下一 tick）
-     * 8. WS 推送派单通知（Redis key 作为兜底，WS 失败时司机端轮询仍可感知）
-     * 9. 记录派单日志
+     *    供拒单接口和 RetryConsumer 使用
+     * 3. 写 order:dispatch:version:{orderId}=0，推送版本号（初始为 0）
+     *    拒单时递增，RetryConsumer 消费时校验版本号实现幂等
+     * 4. 将司机加入 order:dispatched:drivers:{orderId}，防止重复推送
+     * 5. 发延迟消息到 dispatch.retry.queue（x-delay=10s），消息体携带 version=0
+     * 6. 从等待池移除该订单（已进入派单流程，不再参与下一 tick）
+     * 7. WS 推送派单通知（Redis key 作为兜底，WS 失败时司机端轮询仍可感知）
+     * 8. 记录派单日志
      *
      * @param orderId    订单 ID
      * @param driverId   匹配到的司机 ID
      * @param candidates 该订单的完整候选列表（用于计算当前司机的索引）
      */
     private void pushMatchResult(Long orderId, Long driverId, List<Long> candidates) {
-        // 3.12 写司机待接单通知（TTL=10s，与派单窗口一致）
+        // 写司机待接单通知（TTL=10s，与派单窗口一致）
         redisTemplate.opsForValue().set(
                 "driver:pending:order:" + driverId,
                 String.valueOf(orderId),
                 Duration.ofSeconds(PENDING_TTL_SECONDS));
 
-        // 3.13 记录当前推送司机在候选列表中的索引（供阶段 4/5 使用）
+        // 记录当前推送司机在候选列表中的索引（供拒单接口和 RetryConsumer 使用）
         int currentIndex = candidates != null ? candidates.indexOf(driverId) : 0;
         if (currentIndex < 0) currentIndex = 0;
         redisTemplate.opsForValue().set(
@@ -500,28 +498,21 @@ public class GlobalDispatchScheduler {
                 String.valueOf(currentIndex),
                 Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 3.13 写推送版本号（初始为 0），阶段 4 拒单时递增，用于延迟消息幂等校验
+        // 写推送版本号（初始为 0），拒单时递增，RetryConsumer 消费时校验版本号实现幂等
         redisTemplate.opsForValue().set(
                 "order:dispatch:version:" + orderId,
                 "0",
                 Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 兼容现有 RetryConsumer：写 batch:index=0，使其幂等校验能正常工作
-        // 阶段 5 改造 RetryConsumer 后此 key 可废弃
-        redisTemplate.opsForValue().set(
-                "order:dispatch:batch:index:" + orderId,
-                "0",
-                Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
-
-        // 3.15 将司机加入已推送集合，防止重复推送
+        // 将司机加入已推送集合，防止重复推送
         redisTemplate.opsForSet().add("order:dispatched:drivers:" + orderId, String.valueOf(driverId));
         redisTemplate.expire("order:dispatched:drivers:" + orderId, Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 3.14 发延迟消息（x-delay=10s），10s 后 RetryConsumer 检查接单状态
-        // 消息体携带 batchIndex=0，兼容现有 RetryConsumer 的幂等校验逻辑
+        // 发延迟消息（x-delay=10s），消息体携带 version=0
+        // RetryConsumer 消费时校验 msgVersion == redisVersion，不一致则忽略（过期消息）
         Map<String, Object> retryMsg = new HashMap<>();
         retryMsg.put("orderId", orderId);
-        retryMsg.put("batchIndex", 0);
+        retryMsg.put("version", 0);
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,
@@ -531,7 +522,7 @@ public class GlobalDispatchScheduler {
                     return m;
                 });
 
-        // 3.16 从等待池移除已成功推送的订单
+        // 从等待池移除已成功推送的订单
         waitingPool.remove(orderId);
 
         // WS 推送派单通知（Redis key 作为兜底，WS 失败时司机端轮询仍可感知）

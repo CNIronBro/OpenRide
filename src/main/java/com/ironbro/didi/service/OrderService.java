@@ -438,20 +438,6 @@ public class OrderService {
         // 记录拒单日志
         saveDispatchLog(orderId, driverId, DispatchAction.REJECTED, "司机主动拒单，即时重推下一候选");
 
-        // 4.6 原子递增版本号，使当前已发出的延迟消息失效
-        // 使用 Redis INCR 命令（原子操作），避免 GET+SET 的 TOCTOU 竞态：
-        // 若两个请求并发（如司机快速双击），GET+SET 会导致两次都读到旧值，版本号只递增 1 而非 2。
-        // INCR 保证每次调用都严格递增，并发安全。
-        // RetryConsumer 消费时会校验版本号，版本号不一致则忽略（阶段 5 改造后完全生效）
-        String versionKey = "order:dispatch:version:" + orderId;
-        Long newVersion = redisTemplate.opsForValue().increment(versionKey);
-        // 确保版本号 key 有 TTL（INCR 在 key 不存在时会创建，但不设置 TTL）
-        // 仅在首次创建时设置 TTL，避免每次拒单都重置过期时间
-        if (newVersion != null && newVersion == 1) {
-            redisTemplate.expire(versionKey, Duration.ofMinutes(10));
-        }
-        log.info("拒单版本号递增 orderId={} newVersion={}", orderId, newVersion);
-
         // 4.4 读取候选列表
         String candidatesKey = "order:candidates:" + orderId;
         String candidatesJson = redisTemplate.opsForValue().get(candidatesKey);
@@ -497,7 +483,19 @@ public class OrderService {
             return;
         }
 
-        // 4.6 有下一个候选：立即推送
+        // 4.6 有下一个候选：原子递增版本号，使当前已发出的延迟消息失效，再立即推送
+        // 版本号递增必须在确认有下一个候选之后执行。
+        // 若在找候选之前就递增，候选耗尽时 return 会导致版本号已变更但无新延迟消息发出，
+        // 已有的延迟消息因版本号不一致被 RetryConsumer 忽略，订单陷入无人处理的死角。
+        // 使用 Redis INCR（原子操作），避免并发拒单时的 TOCTOU 竞态。
+        String versionKey = "order:dispatch:version:" + orderId;
+        Long newVersion = redisTemplate.opsForValue().increment(versionKey);
+        // INCR 在 key 不存在时会创建并设置为 1，但不设置 TTL，需补充
+        if (newVersion != null && newVersion == 1) {
+            redisTemplate.expire(versionKey, Duration.ofMinutes(10));
+        }
+        log.info("拒单版本号递增 orderId={} newVersion={}", orderId, newVersion);
+
         if (newVersion == null) newVersion = 1L; // 防御性兜底，正常不会为 null
         pushNextDriver(orderId, nextDriverId, nextIndex, newVersion.intValue());
         log.info("拒单即时重推成功 orderId={} prevDriverId={} nextDriverId={} nextIndex={}",
@@ -505,7 +503,7 @@ public class OrderService {
     }
 
     /**
-     * 推送下一个候选司机（拒单即时重推的核心推送逻辑）
+     * 推送下一个候选司机（拒单即时重推 / RetryConsumer 超时重推的公共推送逻辑）
      *
      * 与 GlobalDispatchScheduler.pushMatchResult 类似，但不从等待池移除订单（订单已不在等待池中）。
      *
@@ -513,17 +511,19 @@ public class OrderService {
      * 1. 写 driver:pending:order:{driverId}（TTL=10s）
      * 2. 更新 order:dispatch:current:index:{orderId}
      * 3. 将司机加入 order:dispatched:drivers:{orderId}（防重推）
-     * 4. 递增 order:dispatch:batch:index:{orderId}，使现有 RetryConsumer 的幂等校验感知到新推送
-     *    （阶段 5 改造 RetryConsumer 后改为版本号校验，此 key 可废弃）
-     * 5. 发延迟消息（x-delay=10s），携带新 batchIndex 和版本号
-     * 6. WS 推送派单通知
+     * 4. 发延迟消息（x-delay=10s），携带版本号（RetryConsumer 幂等校验用）
+     * 5. WS 推送派单通知
+     *
+     * 版本号说明：
+     * 每次推送（拒单重推 / RetryConsumer 重推）前，调用方负责原子递增版本号并传入。
+     * 延迟消息携带此版本号，RetryConsumer 消费时校验版本号一致性，过期消息自动忽略。
      *
      * @param orderId    订单 ID
      * @param driverId   下一个候选司机 ID
      * @param index      该司机在候选列表中的索引
-     * @param version    当前版本号（已递增后的值），写入延迟消息供阶段 5 改造后的 RetryConsumer 校验
+     * @param version    当前版本号（调用方已递增后的值），写入延迟消息供 RetryConsumer 幂等校验
      */
-    private void pushNextDriver(Long orderId, Long driverId, int index, int version) {
+    public void pushNextDriver(Long orderId, Long driverId, int index, int version) {
         // 写司机待接单通知（TTL=10s，与派单窗口一致）
         redisTemplate.opsForValue().set(
                 "driver:pending:order:" + driverId,
@@ -540,26 +540,12 @@ public class OrderService {
         redisTemplate.opsForSet().add("order:dispatched:drivers:" + orderId, String.valueOf(driverId));
         redisTemplate.expire("order:dispatched:drivers:" + orderId, Duration.ofMinutes(10));
 
-        // 递增 batch:index，使现有 RetryConsumer 的幂等校验感知到这是一次新推送。
-        // 背景：RetryConsumer 当前用 msgBatchIndex == currentBatchIndex 做幂等校验。
-        // GlobalDispatchScheduler 初始写 batch:index=0，若拒单后仍发 batchIndex=0 的延迟消息，
-        // RetryConsumer 消费时校验通过，会再次触发重试推送，产生多余操作。
-        // 递增 batch:index 后，新延迟消息携带 newBatchIndex，RetryConsumer 消费时校验一致，
-        // 但此时已是新一轮推送的超时检查，行为正确。
-        // 阶段 5 改造 RetryConsumer 后改为版本号校验，此 key 可废弃。
-        String batchIndexKey = "order:dispatch:batch:index:" + orderId;
-        Long newBatchIndex = redisTemplate.opsForValue().increment(batchIndexKey);
-        if (newBatchIndex != null && newBatchIndex == 1) {
-            // key 不存在时 INCR 从 0 开始，首次创建时设置 TTL
-            redisTemplate.expire(batchIndexKey, Duration.ofMinutes(10));
-        }
-        int batchIndex = newBatchIndex != null ? newBatchIndex.intValue() : 1;
-
-        // 发延迟消息（x-delay=10s），携带新 batchIndex 和版本号
+        // 发延迟消息（x-delay=10s），携带版本号
+        // 版本号由调用方（rejectOrder / RetryConsumer）在推送前原子递增并传入，
+        // RetryConsumer 消费时校验 msgVersion == redisVersion，不一致则忽略（过期消息）
         Map<String, Object> retryMsg = new HashMap<>();
         retryMsg.put("orderId", orderId);
-        retryMsg.put("batchIndex", batchIndex);  // 与 Redis 中的 batch:index 一致，RetryConsumer 幂等校验用
-        retryMsg.put("version", version);         // 阶段 5 改造后使用
+        retryMsg.put("version", version);
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,
@@ -581,7 +567,7 @@ public class OrderService {
         }
 
         saveDispatchLog(orderId, driverId, DispatchAction.DISPATCHED,
-                "拒单即时重推 index=" + index + " batchIndex=" + batchIndex + " version=" + version);
+                "推送下一候选司机 index=" + index + " version=" + version);
     }
 
     /** 发送取消消息到 cancel.queue */
