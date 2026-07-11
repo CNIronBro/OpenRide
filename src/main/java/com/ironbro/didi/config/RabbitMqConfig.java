@@ -12,8 +12,6 @@ import java.util.Map;
 /**
  * RabbitMQ 交换机、队列、绑定配置
  *
- * 整体设计（见 technical-design.md 4.4 节）：
- *
  * 正常派单链路：
  *   下单 → dispatch.exchange(dispatch.new) → dispatch.queue
  *        → DispatchConsumer 处理后发延迟消息

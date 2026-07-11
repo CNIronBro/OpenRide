@@ -17,6 +17,8 @@ import com.ironbro.didi.mapper.OrderMapper;
 import com.ironbro.didi.service.dispatch.DispatchWaitingPool;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -33,20 +35,16 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 订单服务
+ * 订单服务类
  *
  * 职责：
  * 1. 乘客下单：写库 + 事务提交后写入 Redis 等待池（由 GlobalDispatchScheduler 统一调度）
  * 2. 查询订单状态（供乘客端轮询）
  * 3. 接单（CAS 乐观锁）、行程状态流转、取消等接口
  *
- * 派单入口变更说明（自适应全局派单改造）：
- * 原方案：createOrder 事务提交后直接发 MQ 到 dispatch.queue，DispatchConsumer 立即处理。
- * 新方案：createOrder 事务提交后写入 order:waiting:pool（Redis ZSET），
- *         GlobalDispatchScheduler 每 2s 统一取出所有待派订单，根据供需比决定 KM 或贪心匹配。
- * 好处：同一 tick 内多个订单可参与全局最优匹配，避免先到订单抢走后到订单唯一合适司机。
  */
 @Slf4j
 @Service
@@ -62,6 +60,7 @@ public class OrderService {
     private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper;
     private final OrderDispatchLogMapper dispatchLogMapper;
+    private final RedissonClient redissonClient;
 
     /**
      * 乘客下单
@@ -74,10 +73,6 @@ public class OrderService {
      * 状态说明：
      * 直接设为 DISPATCHING 而非 PENDING，是因为下单和写等待池在同一事务提交后完成，
      * 不存在"已下单但未进入派单流程"的中间状态需要区分。
-     *
-     * 派单入口说明：
-     * 不再直接发 MQ，改为写入等待池。GlobalDispatchScheduler 每 2s 触发一次 tick，
-     * 统一取出等待池中所有订单参与全局匹配，最多延迟约 2s 开始派单。
      *
      * @param passengerId 乘客 user_id
      * @param req         下单请求参数
@@ -112,7 +107,6 @@ public class OrderService {
             @Override
             public void afterCommit() {
                 // 写入等待池，GlobalDispatchScheduler 每 2s 取出所有待派订单统一调度
-                // 不再直接发 MQ，派单入口从"订单到达立即触发"改为"tick 统一批量处理"
                 waitingPool.add(orderId);
             }
         });
@@ -138,19 +132,9 @@ public class OrderService {
         return order;
     }
 
-    // ----------------------------------------------------------------
-    // 阶段 6：行程状态流转
-    // ----------------------------------------------------------------
 
     /**
-     * 司机接单（CAS 乐观锁）
-     *
-     * 核心并发控制：
-     * 使用 MyBatis-Plus @Version 乐观锁，底层 SQL 为：
-     *   UPDATE `order` SET driver_id=?, status='ACCEPTED', version=version+1
-     *   WHERE id=? AND status='DISPATCHING' AND version=?
-     * 若 version 不匹配（已被其他司机接单），updateById 返回影响行数为 0，
-     * MyBatis-Plus 会抛出 OptimisticLockerException，此处捕获后转为业务异常。
+     * 司机接单
      *
      * 批量派单场景下的并发处理：
      * 同批 N 个司机并发接单，CAS 保证只有一个成功，其余 N-1 个收到"订单已被他人接走"。
@@ -159,9 +143,6 @@ public class OrderService {
      * 接单成功后副作用：
      * 1. 司机状态改为 IN_TRIP，从 GEO 在线集合移除（不再参与新派单）
      * 2. 清除接单司机的待接单通知 key（driver:pending:order:{driverId}）
-     *
-     * 阶段 6 说明：新方案每次只推 1 个司机，不再有"同批其他司机"需要通知，
-     * 原批次清理逻辑（batch:index / batch:set）已废弃。
      *
      * @param orderId  订单 ID
      * @param driverId 司机的 driver.id（非 user_id）
@@ -194,7 +175,6 @@ public class OrderService {
         }
 
         // 接单成功：更新司机状态为 IN_TRIP，从 GEO 在线集合移除
-        // 阶段 6 说明：新方案每次只推 1 个司机（GlobalDispatchScheduler 单司机推送），
         // 不再有"同批其他司机"需要通知，原批次清理逻辑（batch:index / batch:set）已废弃。
         Driver driver = driverMapper.selectById(driverId);
         if (driver != null) {
@@ -314,7 +294,6 @@ public class OrderService {
                 : 10.0;
 
         // 计算行程距离（km），用 Haversine 公式估算起终点直线距离
-        // mock 坐标场景下结果稳定，真实场景可替换为地图 API 返回的实际里程
         double distanceKm = haversineKm(
                 order.getOriginLat().doubleValue(), order.getOriginLng().doubleValue(),
                 order.getDestLat().doubleValue(),   order.getDestLng().doubleValue()
@@ -356,7 +335,7 @@ public class OrderService {
     }
 
     /**
-     * 司机主动拒单（阶段 4）
+     * 司机主动拒单、
      *
      * 业务流程：
      * 1. 校验当前司机确实持有该订单的 pending 通知（driver:pending:order:{driverId} 存在且值为 orderId）
@@ -366,15 +345,11 @@ public class OrderService {
      * 4. 从候选列表取下一个未被推送过的司机，立即推送
      * 5. 若候选耗尽，发取消消息
      *
-     * 即时重推的必要性：
-     * 新方案每次只推 1 个司机，若拒单后不即时处理，乘客需等待整个 10s 超时窗口才能推下一个司机。
-     * 即时重推确保拒单场景下的等待时间与批量方案无实质差距。
-     *
      * @param orderId  订单 ID
      * @param driverId 拒单司机的 driver.id（非 user_id）
      */
     public void rejectOrder(Long orderId, Long driverId) {
-        // 4.2 校验：当前司机确实持有该订单的 pending 通知
+        // 校验当前司机确实持有该订单的 pending 通知
         // driver:pending:order:{driverId} 的值应为 orderId 字符串
         String pendingKey = "driver:pending:order:" + driverId;
         String pendingOrderId = redisTemplate.opsForValue().get(pendingKey);
@@ -397,74 +372,100 @@ public class OrderService {
             return;
         }
 
-        // 4.3 清除当前司机的 pending key，释放该司机（不再参与本订单的等待窗口）
+        // 清除当前司机的 pending key，释放该司机（不再参与本订单的等待窗口）
         redisTemplate.delete(pendingKey);
 
         // 记录拒单日志
         saveDispatchLog(orderId, driverId, DispatchAction.REJECTED, "司机主动拒单，即时重推下一候选");
 
-        // 4.4 读取候选列表
-        String candidatesKey = "order:candidates:" + orderId;
-        String candidatesJson = redisTemplate.opsForValue().get(candidatesKey);
-        if (candidatesJson == null) {
-            // 候选列表已过期（TTL 10min），无法即时重推
-            // 不主动取消订单，让已发出的延迟消息自然到期，由 RetryConsumer 走扩圈逻辑
-            log.warn("拒单后候选列表已过期，等待 RetryConsumer 扩圈兜底 orderId={}", orderId);
-            return;
-        }
-
-        List<Long> candidates;
+        // Bug 修复：对"找候选 → 递增版本号 → 推送"加 lock:compensate 保护，与 RetryConsumer 互斥。
+        // 不加锁时，rejectOrder 和 RetryConsumer 可能并发执行：
+        // 两者都找到同一个下一候选司机，各自递增版本号并调用 pushNextDriver，
+        // 导致同一司机被推送两次（pending key 被覆盖写，WS 通知重复发送）。
+        // tryLock(waitTime=0)：抢不到锁立即放弃，让 RetryConsumer 处理，避免阻塞 HTTP 请求线程。
+        // leaseTime=10s：足够覆盖一次完整的"找候选+推送"操作，超时自动释放防死锁。
+        String compensateLockKey = "lock:compensate:" + orderId;
+        RLock lock = redissonClient.getLock(compensateLockKey);
+        boolean locked = false;
         try {
-            candidates = objectMapper.readValue(candidatesJson, new TypeReference<>() {});
-        } catch (Exception e) {
-            log.error("候选列表解析失败 orderId={}", orderId, e);
-            return;
-        }
+            locked = lock.tryLock(0, 10, TimeUnit.SECONDS);
+            if (!locked) {
+                // RetryConsumer 正在处理同一订单，拒单即时重推放弃，等 RetryConsumer 推下一个
+                log.info("拒单竞争补偿锁失败，RetryConsumer 正在处理，放弃即时重推 orderId={}", orderId);
+                return;
+            }
 
-        // 4.5 取下一个未被推送过的候选司机
-        // 跳过 order:dispatched:drivers:{orderId} 中已有的司机（防重推）
-        Set<String> alreadyDispatched = redisTemplate.opsForSet()
-                .members("order:dispatched:drivers:" + orderId);
+            // 读取候选列表
+            String candidatesKey = "order:candidates:" + orderId;
+            String candidatesJson = redisTemplate.opsForValue().get(candidatesKey);
+            if (candidatesJson == null) {
+                // 候选列表已过期（TTL 10min），无法即时重推
+                // 不主动取消订单，让已发出的延迟消息自然到期，由 RetryConsumer 走扩圈逻辑
+                log.warn("拒单后候选列表已过期，等待 RetryConsumer 扩圈兜底 orderId={}", orderId);
+                return;
+            }
 
-        Long nextDriverId = null;
-        int nextIndex = -1;
-        for (int i = 0; i < candidates.size(); i++) {
-            Long candidateId = candidates.get(i);
-            boolean alreadySent = alreadyDispatched != null
-                    && alreadyDispatched.contains(String.valueOf(candidateId));
-            if (!alreadySent) {
-                nextDriverId = candidateId;
-                nextIndex = i;
-                break;
+            List<Long> candidates;
+            try {
+                candidates = objectMapper.readValue(candidatesJson, new TypeReference<>() {});
+            } catch (Exception e) {
+                log.error("候选列表解析失败 orderId={}", orderId, e);
+                return;
+            }
+
+            // 取下一个未被推送过的候选司机
+            // 跳过 order:dispatched:drivers:{orderId} 中已有的司机（防重推）
+            Set<String> alreadyDispatched = redisTemplate.opsForSet()
+                    .members("order:dispatched:drivers:" + orderId);
+
+            Long nextDriverId = null;
+            int nextIndex = -1;
+            for (int i = 0; i < candidates.size(); i++) {
+                Long candidateId = candidates.get(i);
+                boolean alreadySent = alreadyDispatched != null
+                        && alreadyDispatched.contains(String.valueOf(candidateId));
+                if (!alreadySent) {
+                    nextDriverId = candidateId;
+                    nextIndex = i;
+                    break;
+                }
+            }
+
+            if (nextDriverId == null) {
+                // 候选列表内所有司机均已推送过，无法即时重推
+                // 不主动取消订单：RetryConsumer 的延迟消息 10s 后到期，会走 handleExhausted 扩圈逻辑，
+                // 扩圈后若仍无司机才最终取消。拒单即时重推只负责在现有候选列表内快速切换，
+                // 扩圈和最终取消属于超时重试的职责，不在此处越权处理。
+                log.info("拒单后当前候选列表已耗尽，等待 RetryConsumer 扩圈 orderId={}", orderId);
+                return;
+            }
+
+            // 有下一个候选：原子递增版本号，使当前已发出的延迟消息失效，再立即推送
+            // 版本号递增必须在确认有下一个候选之后执行。
+            // 若在找候选之前就递增，候选耗尽时 return 会导致版本号已变更但无新延迟消息发出，
+            // 已有的延迟消息因版本号不一致被 RetryConsumer 忽略，订单陷入无人处理的死角。
+            // 使用 Redis 原子操作，避免并发拒单时的 TOCTOU 竞态。
+            String versionKey = "order:dispatch:version:" + orderId;
+            Long newVersion = redisTemplate.opsForValue().increment(versionKey);
+            // INCR 在 key 不存在时会创建并设置为 1，但不设置 TTL，需补充
+            if (newVersion != null && newVersion == 1) {
+                redisTemplate.expire(versionKey, Duration.ofMinutes(10));
+            }
+            log.info("拒单版本号递增 orderId={} newVersion={}", orderId, newVersion);
+
+            if (newVersion == null) newVersion = 1L; // 防御性兜底，正常不会为 null
+            pushNextDriver(orderId, nextDriverId, nextIndex, newVersion.intValue());
+            log.info("拒单即时重推成功 orderId={} prevDriverId={} nextDriverId={} nextIndex={}",
+                    orderId, driverId, nextDriverId, nextIndex);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("拒单竞争补偿锁被中断 orderId={}", orderId);
+        } finally {
+            if (locked && lock.isHeldByCurrentThread()) {
+                lock.unlock();
             }
         }
-
-        if (nextDriverId == null) {
-            // 候选列表内所有司机均已推送过，无法即时重推
-            // 不主动取消订单：RetryConsumer 的延迟消息 10s 后到期，会走 handleExhausted 扩圈逻辑，
-            // 扩圈后若仍无司机才最终取消。拒单即时重推只负责在现有候选列表内快速切换，
-            // 扩圈和最终取消属于超时重试的职责，不在此处越权处理。
-            log.info("拒单后当前候选列表已耗尽，等待 RetryConsumer 扩圈 orderId={}", orderId);
-            return;
-        }
-
-        // 4.6 有下一个候选：原子递增版本号，使当前已发出的延迟消息失效，再立即推送
-        // 版本号递增必须在确认有下一个候选之后执行。
-        // 若在找候选之前就递增，候选耗尽时 return 会导致版本号已变更但无新延迟消息发出，
-        // 已有的延迟消息因版本号不一致被 RetryConsumer 忽略，订单陷入无人处理的死角。
-        // 使用 Redis INCR（原子操作），避免并发拒单时的 TOCTOU 竞态。
-        String versionKey = "order:dispatch:version:" + orderId;
-        Long newVersion = redisTemplate.opsForValue().increment(versionKey);
-        // INCR 在 key 不存在时会创建并设置为 1，但不设置 TTL，需补充
-        if (newVersion != null && newVersion == 1) {
-            redisTemplate.expire(versionKey, Duration.ofMinutes(10));
-        }
-        log.info("拒单版本号递增 orderId={} newVersion={}", orderId, newVersion);
-
-        if (newVersion == null) newVersion = 1L; // 防御性兜底，正常不会为 null
-        pushNextDriver(orderId, nextDriverId, nextIndex, newVersion.intValue());
-        log.info("拒单即时重推成功 orderId={} prevDriverId={} nextDriverId={} nextIndex={}",
-                orderId, driverId, nextDriverId, nextIndex);
     }
 
     /**
@@ -478,10 +479,6 @@ public class OrderService {
      * 3. 将司机加入 order:dispatched:drivers:{orderId}（防重推）
      * 4. 发延迟消息（x-delay=10s），携带版本号（RetryConsumer 幂等校验用）
      * 5. WS 推送派单通知
-     *
-     * 版本号说明：
-     * 每次推送（拒单重推 / RetryConsumer 重推）前，调用方负责原子递增版本号并传入。
-     * 延迟消息携带此版本号，RetryConsumer 消费时校验版本号一致性，过期消息自动忽略。
      *
      * @param orderId    订单 ID
      * @param driverId   下一个候选司机 ID
@@ -520,7 +517,7 @@ public class OrderService {
                     return m;
                 });
 
-        // WS 推送派单通知（Redis key 作为兜底，WS 失败时司机端轮询仍可感知）
+        // WS 推送派单通知
         try {
             Driver driver = driverMapper.selectById(driverId);
             if (driver != null) {
@@ -576,7 +573,7 @@ public class OrderService {
         Order order = orderMapper.selectById(orderId);
         if (order == null) throw new BizException("订单不存在");
 
-        // 鉴权：乘客只能取消自己的订单；司机通过 driver.userId 关联
+        // 鉴权，乘客只能取消自己的订单；司机通过 driver.userId 关联
         if ("PASSENGER".equals(cancelBy) && !order.getPassengerId().equals(userId)) {
             throw new BizException(403, "无权操作此订单");
         }
@@ -670,8 +667,6 @@ public class OrderService {
     /**
      * Haversine 公式计算两点间球面距离（公里）
      *
-     * 用于行程结束时估算里程，精度满足计价需求（误差 < 0.5%）。
-     * 真实场景可替换为地图 API 返回的实际行驶里程。
      */
     public static double haversineKm(double lat1, double lng1, double lat2, double lng2) {
         final double R = 6371.0; // 地球半径（km）

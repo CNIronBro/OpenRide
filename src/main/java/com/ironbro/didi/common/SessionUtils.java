@@ -6,8 +6,7 @@ import jakarta.servlet.http.HttpSession;
 /**
  * Session 工具类
  *
- * 本项目不使用 JWT，采用 HttpSession 存储登录态。
- * 无需 Spring Security，简单满足三端（乘客/司机/管理员）的身份识别需求。
+ * 采用 HttpSession 存储登录态，方便快捷，不引入额外复杂度。
  */
 public class SessionUtils {
 

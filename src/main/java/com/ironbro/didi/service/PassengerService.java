@@ -11,7 +11,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 /**
- * 乘客服务
+ * 乘客服务类
  *
  * 职责：
  * 1. 查询乘客个人信息

@@ -16,12 +16,6 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
  * 2. 连接关闭时：从 WebSocketSessionManager 移除
  * 3. 收到消息时：处理心跳 PING，回复 PONG
  *
- * 鉴权说明：
- * WebSocketConfig 中注册了 HttpSessionHandshakeInterceptor，握手时会将 HttpSession 的所有
- * attributes（含 userId、role）复制到 WebSocket session 的 attributes 中。
- * 因此此处可直接通过 session.getAttributes().get("userId") 取到已登录用户的 ID，
- * 与 SessionUtils 体系完全兼容，无需引入 JWT。
- *
  * 心跳说明：
  * 客户端每 25s 发一次 {"type":"PING"}，服务端回复 {"type":"PONG"}。
  * 目的：防止 NAT/防火墙/Nginx 因空闲超时断开连接（通常 30-60s 无数据即断）。
@@ -70,7 +64,6 @@ public class RideWebSocketHandler extends TextWebSocketHandler {
     /**
      * 收到客户端消息：处理心跳 PING
      *
-     * 当前只处理 PING/PONG 心跳，其他消息类型（如第三期的 LOCATION_UPDATE）在此扩展。
      * 未知消息类型只记录 debug 日志，不做任何处理。
      */
     @Override

@@ -16,12 +16,6 @@ import java.util.List;
 /**
  * 假在线司机清理任务（xxl-job JobHandler）
  *
- * 替换阶段 4 中 DriverLocationService 的 @Scheduled(fixedDelay=30_000) 临时实现。
- * 使用 xxl-job 的优势：
- * 1. 可在调度中心动态调整执行频率，无需重启应用
- * 2. 多实例部署时，xxl-job 保证同一时刻只有一个实例执行（路由策略：第一个/轮询等）
- * 3. 执行记录、失败告警、手动触发等运维能力
- *
  * 业务逻辑：
  * 扫描数据库中 status=ONLINE 的司机，检查其 Redis 心跳 key 是否存在。
  * 心跳 key TTL=30s，若已过期说明司机 30s 内未上报位置（断网/假在线），强制下线。

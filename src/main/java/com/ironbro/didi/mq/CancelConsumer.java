@@ -32,8 +32,6 @@ import java.util.Map;
  * 1. 候选司机列表耗尽（所有候选司机均未在 15s 内接单）
  * 2. 附近无可用司机（GEO 召回结果为空）
  *
- * 幂等说明：
- * 若订单已不在 DISPATCHING 状态（如乘客已主动取消），直接忽略，不重复取消。
  */
 @Slf4j
 @Component
@@ -82,7 +80,6 @@ public class CancelConsumer {
     /**
      * 执行订单自动取消
      *
-     * 幂等：若订单已不在 DISPATCHING 状态，直接忽略，不重复操作。
      *
      * @param orderId 订单 ID
      * @param reason  取消原因
@@ -94,7 +91,7 @@ public class CancelConsumer {
             return;
         }
 
-        // 幂等：只有 DISPATCHING 状态的订单才能被系统自动取消
+        // 只有 DISPATCHING 状态的订单才能被系统自动取消
         if (order.getStatus() != OrderStatus.DISPATCHING) {
             log.info("订单已不在派单中状态，忽略取消 orderId={} status={}", orderId, order.getStatus());
             return;

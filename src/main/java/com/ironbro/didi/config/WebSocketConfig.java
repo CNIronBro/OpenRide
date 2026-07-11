@@ -10,16 +10,8 @@ import org.springframework.web.socket.server.support.HttpSessionHandshakeInterce
 /**
  * WebSocket 配置
  *
- * 注册 WebSocket handler，路径为 /ws。
+ * 注册 WebSocket handler，路径为 /ws
  *
- * HttpSessionHandshakeInterceptor 的作用：
- * 在 WebSocket 握手阶段，将当前 HTTP 请求关联的 HttpSession 中的所有 attributes
- * （含 userId、role，由 SessionUtils.setLogin 写入）复制到 WebSocket session 的 attributes 中。
- * 这样 RideWebSocketHandler 可以直接通过 session.getAttributes().get("userId") 取到登录用户 ID，
- * 无需引入 JWT，与现有 HttpSession 认证体系完全兼容。
- *
- * setAllowedOriginPatterns("*")：
- * 开发阶段允许所有来源，生产环境应替换为实际域名。
  */
 @Configuration
 @EnableWebSocket

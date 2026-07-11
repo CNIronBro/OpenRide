@@ -5,7 +5,7 @@ package com.ironbro.didi.websocket;
  *
  * 所有服务端推送消息均使用此格式，序列化为 JSON 后通过 WebSocket 发送。
  *
- * type 枚举值（当前第一期）：
+ * type 枚举值：
  *   DISPATCH_NOTIFY    - 服务端 → 司机：有新订单待接单
  *   DISPATCH_CANCELLED - 服务端 → 司机：同批订单已被他人接走，关闭弹窗
  *   ORDER_ACCEPTED     - 服务端 → 乘客：司机已接单

@@ -7,7 +7,6 @@ package com.ironbro.didi.enums;
  *   PENDING → DISPATCHING → ACCEPTED → PICKING → IN_TRIP → FINISHED
  *                                                         ↘ CANCELLED（任意阶段均可取消）
  *
- * 不引入状态机框架，流转逻辑在 OrderService 中用 if 判断实现。
  */
 public enum OrderStatus {
     PENDING,      // 已下单，等待进入派单队列

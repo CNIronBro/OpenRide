@@ -13,7 +13,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
@@ -32,13 +31,8 @@ import java.util.concurrent.TimeUnit;
  *
  * 补偿策略：
  * - 扫描 status=DISPATCHING AND updated_at < NOW()-5min 的订单
- * - 检查 Redis 中是否有正在处理的标记（lock:dispatch:{orderId}）
  * - 无标记则重新写入等待池（order:waiting:pool），由 GlobalDispatchScheduler 下一个 tick 调度
  * - 若 dispatch_retry_count 超过最大值（10次），直接取消订单
- *
- * 幂等保证（阶段 7 对接）：
- * 每个订单的补偿操作前加 Redisson tryLock（key=lock:compensate:{orderId}），
- * 防止 xxl-job 多节点并发执行同一订单的补偿任务。
  *
  * xxl-job 配置说明：
  * - JobHandler 名称：zombieOrderScanJob
@@ -58,7 +52,6 @@ public class ZombieOrderScanJob {
 
     private final OrderMapper orderMapper;
     private final OrderDispatchLogMapper dispatchLogMapper;
-    private final StringRedisTemplate redisTemplate;
     private final RedissonClient redissonClient;
     private final DispatchWaitingPool waitingPool;
 
@@ -101,9 +94,9 @@ public class ZombieOrderScanJob {
     private void compensateOrder(Order order) {
         Long orderId = order.getId();
 
-        // 8.5 补偿幂等锁：防止 xxl-job 多节点并发执行同一订单的补偿
+        // 补偿幂等锁：防止 xxl-job 多节点并发执行同一订单的补偿
         // tryLock(waitTime=0)：不等待，若锁已被持有（另一节点正在补偿），直接跳过
-        // leaseTime=60s：补偿操作（查库+发 MQ）通常在 1s 内完成，60s 足够兜底
+        // leaseTime=60s：补偿操作（查库+写等待池）通常在 1s 内完成，60s 足够兜底
         String compensateLockKey = "lock:compensate:" + orderId;
         RLock compensateLock = redissonClient.getLock(compensateLockKey);
         boolean locked = false;
@@ -115,15 +108,6 @@ public class ZombieOrderScanJob {
                 return;
             }
 
-            // 8.3.1 检查是否已有 MQ 在处理（dispatch 幂等锁存在说明 MQ 消费者正在处理）
-            // 若 lock:dispatch:{orderId} 存在，说明 MQ 链路正常，无需补偿
-            String dispatchLockKey = "lock:dispatch:" + orderId;
-            Boolean mqProcessing = redisTemplate.hasKey(dispatchLockKey);
-            if (Boolean.TRUE.equals(mqProcessing)) {
-                log.info("[xxl-job] MQ 正在处理，跳过补偿 orderId={}", orderId);
-                return;
-            }
-
             // 重新查询订单，防止在获取锁期间状态已变更
             Order freshOrder = orderMapper.selectById(orderId);
             if (freshOrder == null || freshOrder.getStatus() != OrderStatus.DISPATCHING) {
@@ -131,7 +115,7 @@ public class ZombieOrderScanJob {
                 return;
             }
 
-            // 8.3.2 根据重试次数决定补偿策略
+            // 根据重试次数决定补偿策略
             int retryCount = freshOrder.getDispatchRetryCount() != null ? freshOrder.getDispatchRetryCount() : 0;
 
             if (retryCount >= MAX_RETRY_COUNT) {
@@ -171,7 +155,7 @@ public class ZombieOrderScanJob {
         // 重新写入等待池，GlobalDispatchScheduler 下一个 tick（最多 2s）会取出并调度
         waitingPool.add(order.getId());
 
-        // 8.6 记录补偿日志
+        // 记录补偿日志
         saveDispatchLog(order.getId(), null, DispatchAction.COMPENSATED,
                 "僵尸订单补偿，重新写入等待池，retryCount=" + order.getDispatchRetryCount());
 
@@ -190,7 +174,7 @@ public class ZombieOrderScanJob {
         order.setCancelledAt(LocalDateTime.now());
         orderMapper.updateById(order);
 
-        // 8.6 记录补偿日志
+        // 记录补偿日志
         saveDispatchLog(order.getId(), null, DispatchAction.COMPENSATED,
                 "僵尸订单超过最大重试次数，系统自动取消");
 

@@ -259,6 +259,13 @@ public class GlobalDispatchScheduler {
                 continue;
             }
 
+            // 清空历史推送记录（Bug 6 修复）：
+            // 等待池中的订单尚未完成首次推送，dispatched set 应为空。
+            // 若订单因无司机在多个 tick 中等待，每次 tick 都会覆盖写候选列表，
+            // 但 dispatched set 是累积的，不清空会导致新候选列表中的司机被误判为"已推送过"，
+            // 最终所有候选都被跳过，订单永远无法派出。
+            redisTemplate.delete("order:dispatched:drivers:" + orderId);
+
             // 写入初始搜索半径，供 RetryConsumer 候选耗尽后扩圈使用
             redisTemplate.opsForValue().set("order:dispatch:radius:" + orderId,
                     String.valueOf(INITIAL_RADIUS_KM), Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
@@ -447,12 +454,21 @@ public class GlobalDispatchScheduler {
 
         // 将 KM 结果转换为 orderId → driverId 映射
         // matchArray[i] = j 表示订单 i 匹配到司机 j；-1 表示未匹配（司机数不足）
+        // Bug 1 修复：KM 对已推送司机（收益=0）仍可能产生匹配（当所有候选收益均为 0 时），
+        // 需在结果转换阶段再次过滤，防止重复推送。
         Map<Long, Long> result = new HashMap<>();
         for (int i = 0; i < orderCount; i++) {
             int driverIdx = matchArray[i];
-            if (driverIdx >= 0) {
-                result.put(orderIds.get(i), driverIds.get(driverIdx));
+            if (driverIdx < 0) continue;
+            Long matchedDriverId = driverIds.get(driverIdx);
+            // 过滤已推送过的司机：收益=0 时 KM 仍可能将其匹配出来（僵尸订单重派场景）
+            Set<String> alreadyDispatched = redisTemplate.opsForSet()
+                    .members("order:dispatched:drivers:" + orderIds.get(i));
+            if (alreadyDispatched != null && alreadyDispatched.contains(String.valueOf(matchedDriverId))) {
+                log.debug("KM 匹配到已推送司机，跳过 orderId={} driverId={}", orderIds.get(i), matchedDriverId);
+                continue;
             }
+            result.put(orderIds.get(i), matchedDriverId);
         }
 
         log.info("KM 匹配完成：{} 个订单成功匹配，{} 个未匹配",
@@ -471,10 +487,11 @@ public class GlobalDispatchScheduler {
      * 1. 写 driver:pending:order:{driverId}（TTL=10s），司机端轮询此 key 感知新订单
      * 2. 写 order:dispatch:current:index:{orderId}，记录当前推送司机在候选列表中的索引
      *    供拒单接口和 RetryConsumer 使用
-     * 3. 写 order:dispatch:version:{orderId}=0，推送版本号（初始为 0）
-     *    拒单时递增，RetryConsumer 消费时校验版本号实现幂等
+     * 3. 写 order:dispatch:version:{orderId}，推送版本号（setIfAbsent+INCR，严格递增）
+     *    拒单时递增，RetryConsumer 消费时校验版本号实现幂等。
+     *    不直接 set "0"，防止僵尸订单重派时旧延迟消息（version=0）复活。
      * 4. 将司机加入 order:dispatched:drivers:{orderId}，防止重复推送
-     * 5. 发延迟消息到 dispatch.retry.queue（x-delay=10s），消息体携带 version=0
+     * 5. 发延迟消息到 dispatch.retry.queue（x-delay=10s），消息体携带 INCR 后的版本号
      * 6. 从等待池移除该订单（已进入派单流程，不再参与下一 tick）
      * 7. WS 推送派单通知（Redis key 作为兜底，WS 失败时司机端轮询仍可感知）
      * 8. 记录派单日志
@@ -491,28 +508,39 @@ public class GlobalDispatchScheduler {
                 Duration.ofSeconds(PENDING_TTL_SECONDS));
 
         // 记录当前推送司机在候选列表中的索引（供拒单接口和 RetryConsumer 使用）
-        int currentIndex = candidates != null ? candidates.indexOf(driverId) : 0;
-        if (currentIndex < 0) currentIndex = 0;
+        int currentIndex = candidates != null ? candidates.indexOf(driverId) : -1;
+        if (currentIndex < 0) {
+            // Bug 7 修复：正常情况下 KM/贪心匹配的司机一定在候选列表中；
+            // 若 indexOf 返回 -1，说明出现了意外的跨列表匹配，打 warn 便于排查，兜底为 0。
+            log.warn("匹配司机不在候选列表中，index 兜底为 0 orderId={} driverId={}", orderId, driverId);
+            currentIndex = 0;
+        }
         redisTemplate.opsForValue().set(
                 "order:dispatch:current:index:" + orderId,
                 String.valueOf(currentIndex),
                 Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 写推送版本号（初始为 0），拒单时递增，RetryConsumer 消费时校验版本号实现幂等
-        redisTemplate.opsForValue().set(
-                "order:dispatch:version:" + orderId,
-                "0",
-                Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
+        // Bug 4 修复：不直接 set "0"，改为 setIfAbsent + INCR。
+        // 原因：僵尸订单被 ZombieOrderScanJob 重新入池后，若上一轮派单的延迟消息恰好也携带
+        // version=0，直接 set "0" 会使旧消息的幂等校验误通过，触发多余的 RetryConsumer 执行。
+        // setIfAbsent：key 不存在时写 0（全新订单），已存在时保留旧版本号（僵尸订单重派）。
+        // INCR 后版本号严格递增，新消息版本号一定大于任何旧消息，旧消息到达时幂等校验失败被忽略。
+        String versionKey = "order:dispatch:version:" + orderId;
+        redisTemplate.opsForValue().setIfAbsent(versionKey, "0", Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
+        Long newVersion = redisTemplate.opsForValue().increment(versionKey);
+        // 刷新 TTL（setIfAbsent 仅在 key 不存在时设置 TTL，已存在时 TTL 不变，需手动刷新）
+        redisTemplate.expire(versionKey, Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
+        int version = newVersion != null ? newVersion.intValue() : 1;
 
         // 将司机加入已推送集合，防止重复推送
         redisTemplate.opsForSet().add("order:dispatched:drivers:" + orderId, String.valueOf(driverId));
         redisTemplate.expire("order:dispatched:drivers:" + orderId, Duration.ofMinutes(CANDIDATES_TTL_MINUTES));
 
-        // 发延迟消息（x-delay=10s），消息体携带 version=0
+        // 发延迟消息（x-delay=10s），消息体携带 version（INCR 后的新版本号）
         // RetryConsumer 消费时校验 msgVersion == redisVersion，不一致则忽略（过期消息）
         Map<String, Object> retryMsg = new HashMap<>();
         retryMsg.put("orderId", orderId);
-        retryMsg.put("version", 0);
+        retryMsg.put("version", version);
         rabbitTemplate.convertAndSend(
                 RabbitMqConfig.DISPATCH_EXCHANGE,
                 RabbitMqConfig.ROUTING_DISPATCH_RETRY,

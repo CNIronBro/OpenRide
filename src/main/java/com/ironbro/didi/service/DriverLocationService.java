@@ -24,15 +24,7 @@ import java.util.List;
  * 3. 附近司机召回：GEORADIUS
  * 4. 假在线检测：由 xxl-job FakeOnlineCleanJob 定期调用 removeFromOnline 完成清理
  *
- * Redis Key 设计：
- *   driver:online:{city}                  ZSET(GEO)  在线司机地理位置（空间检索用）
- *   driver:heartbeat:{driverId}           STRING     心跳，TTL=30s
- *   driver:location:ts:{driverId}         STRING     上次上报时间戳，用于乱序过滤
- *   driver:location:trusted:{driverId}    STRING     最新可信坐标 "lat,lng"，GEO 写入基准，仅通过漂移检测的点才更新
- *   driver:location:candidate:{driverId}  STRING     漂移恢复候选坐标；DRIFTING 态下第一个合理点存此处，后续合理点与此比较
- *   driver:location:ok_count:{driverId}   STRING     漂移恢复计数；key 存在即代表处于 DRIFTING 态，TTL=30s
- *
- * 漂移过滤状态机（V5）：
+ * 漂移过滤状态机：
  *
  *   NORMAL 态（ok_count key 不存在）：
  *     合理点 → 直接更新 trusted + 写 GEO
@@ -173,15 +165,8 @@ public class DriverLocationService {
         return geoUpdated;
     }
 
-    // ----------------------------------------------------------------
-    // 附近司机召回
-    // ----------------------------------------------------------------
-
     /**
      * 召回指定坐标附近的在线司机列表
-     *
-     * 使用 GEORADIUS（Spring Data Redis 封装为 radius）
-     * 返回按距离升序排列的司机 ID 列表
      *
      * @param lat        中心点纬度
      * @param lng        中心点经度
@@ -207,10 +192,6 @@ public class DriverLocationService {
         }
         return driverIds;
     }
-
-    // ----------------------------------------------------------------
-    // 司机主动下线：从 GEO 集合移除，清除心跳
-    // ----------------------------------------------------------------
 
     /**
      * 司机下线时清理 Redis 中的在线状态

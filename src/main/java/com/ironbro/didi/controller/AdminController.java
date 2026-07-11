@@ -16,9 +16,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 
 /**
- * 管理员接口
+ * 管理员接口，不做重点
  *
- * 所有接口均校验 ADMIN 角色，非管理员返回 403。
  */
 @RestController
 @RequestMapping("/admin")
@@ -27,9 +26,7 @@ public class AdminController {
 
     private final AdminService adminService;
 
-    // ----------------------------------------------------------------
-    // 权限校验工具方法
-    // ----------------------------------------------------------------
+    /** 权限校验工具方法 */
 
     private void checkAdmin(HttpSession session) {
         Long userId = SessionUtils.getUserId(session);
@@ -37,9 +34,7 @@ public class AdminController {
         if (SessionUtils.getRole(session) != UserRole.ADMIN) throw new BizException(403, "无权限");
     }
 
-    // ----------------------------------------------------------------
-    // 3.5 司机列表（分页 + 状态筛选）
-    // ----------------------------------------------------------------
+    /** 司机列表（分页 + 状态筛选） */
 
     @GetMapping("/drivers")
     public Result<Page<Driver>> drivers(
@@ -51,9 +46,7 @@ public class AdminController {
         return Result.ok(adminService.listDrivers(page, size, status));
     }
 
-    // ----------------------------------------------------------------
-    // 3.6 订单列表（分页 + 状态筛选）
-    // ----------------------------------------------------------------
+    /** 订单列表（分页 + 状态筛选） */
 
     @GetMapping("/orders")
     public Result<Page<Order>> orders(
@@ -65,12 +58,9 @@ public class AdminController {
         return Result.ok(adminService.listOrders(page, size, status));
     }
 
-    // ----------------------------------------------------------------
-    // 3.7 资质审核（通过 / 拒绝）
-    // ----------------------------------------------------------------
 
     /**
-     * 审核司机资质
+     * 司机资质审核（通过 / 拒绝）
      *
      * 请求体：{ "action": "APPROVED" / "REJECTED" }
      * 通过后司机可上线接单；拒绝后司机需重新提交材料。
@@ -84,9 +74,7 @@ public class AdminController {
         return Result.ok();
     }
 
-    // ----------------------------------------------------------------
-    // 封禁 / 解封司机
-    // ----------------------------------------------------------------
+    /** 封禁 / 解封司机 */
 
     @PostMapping("/drivers/{id}/ban")
     public Result<Void> banDriver(@PathVariable Long id, HttpSession session) {
@@ -102,9 +90,7 @@ public class AdminController {
         return Result.ok();
     }
 
-    // ----------------------------------------------------------------
-    // 乘客列表 + 封禁 / 解封乘客
-    // ----------------------------------------------------------------
+    /** 乘客列表 + 封禁 / 解封乘客 */
 
     @GetMapping("/passengers")
     public Result<Page<User>> passengers(
@@ -129,9 +115,7 @@ public class AdminController {
         return Result.ok();
     }
 
-    // ----------------------------------------------------------------
-    // 强制取消订单
-    // ----------------------------------------------------------------
+    /** 强制取消订单 */
 
     @PostMapping("/orders/{id}/cancel")
     public Result<Void> cancelOrder(@PathVariable Long id, HttpSession session) {
@@ -140,9 +124,7 @@ public class AdminController {
         return Result.ok();
     }
 
-    // ----------------------------------------------------------------
-    // 3.8 统计看板数据
-    // ----------------------------------------------------------------
+    /** 统计看板数据 */
 
     @GetMapping("/stats")
     public Result<Map<String, Object>> stats(HttpSession session) {

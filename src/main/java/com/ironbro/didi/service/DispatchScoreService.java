@@ -17,7 +17,7 @@ import java.util.List;
  * 职责：对 GEO 召回的候选司机列表进行多维度评分并排序，
  * 选出最优司机优先派单，保证派单公平性和服务质量。
  *
- * 评分公式（见 technical-design.md 4.1 节）：
+ * 评分公式
  *   score = w1 * distance_score + w2 * idle_score + w3 * accept_rate_score + w4 * dispatch_penalty
  *
  *   distance_score    = 1 - (distance / max_distance)        // 越近分越高
@@ -100,9 +100,6 @@ public class DispatchScoreService {
 
     /**
      * 计算单个候选司机的评分（供 KM 矩阵构造使用）
-     *
-     * 与 score() 使用相同的公式，但直接返回浮点分值而非排序后的 ID 列表，
-     * 便于 GlobalDispatchScheduler 在构造 n×m 收益矩阵时逐格填值。
      *
      * @param candidate  候选司机（含距离信息）
      * @param maxDistance 召回半径（公里），用于归一化距离分

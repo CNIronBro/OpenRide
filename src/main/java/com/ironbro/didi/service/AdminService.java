@@ -37,9 +37,7 @@ public class AdminService {
     private final OrderMapper  orderMapper;
     private final UserMapper   userMapper;
 
-    // ----------------------------------------------------------------
-    // 分页查询
-    // ----------------------------------------------------------------
+    /** 分页查询 */
 
     public Page<Driver> listDrivers(int page, int size, String status) {
         LambdaQueryWrapper<Driver> wrapper = new LambdaQueryWrapper<>();
@@ -64,9 +62,6 @@ public class AdminService {
                 new LambdaQueryWrapper<User>().eq(User::getRole, UserRole.PASSENGER));
     }
 
-    // ----------------------------------------------------------------
-    // 司机资质审核
-    // ----------------------------------------------------------------
 
     /**
      * 审核司机资质
@@ -89,9 +84,7 @@ public class AdminService {
         driverMapper.updateById(driver);
     }
 
-    // ----------------------------------------------------------------
-    // 司机封禁 / 解封
-    // ----------------------------------------------------------------
+    /** 司机封禁 / 解封 */
 
     public void banDriver(Long driverId) {
         Driver driver = driverMapper.selectById(driverId);
@@ -108,9 +101,7 @@ public class AdminService {
         driverMapper.updateById(driver);
     }
 
-    // ----------------------------------------------------------------
-    // 乘客封禁 / 解封
-    // ----------------------------------------------------------------
+    /** 乘客封禁 / 解封 */
 
     public void banPassenger(Long userId) {
         User user = userMapper.selectById(userId);
@@ -126,9 +117,6 @@ public class AdminService {
         userMapper.updateById(user);
     }
 
-    // ----------------------------------------------------------------
-    // 强制取消订单
-    // ----------------------------------------------------------------
 
     /**
      * 管理员强制取消订单
@@ -151,9 +139,6 @@ public class AdminService {
         orderMapper.updateById(order);
     }
 
-    // ----------------------------------------------------------------
-    // 统计看板
-    // ----------------------------------------------------------------
 
     /**
      * 统计看板数据
@@ -166,8 +151,6 @@ public class AdminService {
      * - dailyOrders：近 7 日每日订单量（用于柱状图）
      * - dailyFinance：近 7 日每日财务明细（用于财务统计页）
      *
-     * 注意：MyBatis-Plus 不直接支持 SUM 聚合，营收通过 selectList + stream 求和。
-     * 数据量较小时可接受，后续可改为自定义 XML 查询优化。
      */
     public Map<String, Object> getStats() {
         LocalDateTime todayStart = LocalDate.now().atStartOfDay();
@@ -244,8 +227,6 @@ public class AdminService {
     /**
      * 查询指定时间段内已完成订单的营收总和
      *
-     * MyBatis-Plus 无原生 SUM 支持，通过 selectList 只查 actual_price 字段后 stream 求和。
-     * 仅查单列字段（.select(Order::getActualPrice)）可减少数据传输量。
      */
     private BigDecimal sumRevenue(LocalDateTime start, LocalDateTime end) {
         return orderMapper.selectList(

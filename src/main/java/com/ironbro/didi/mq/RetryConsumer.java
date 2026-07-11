@@ -1,12 +1,17 @@
 package com.ironbro.didi.mq;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ironbro.didi.config.RabbitMqConfig;
+import com.ironbro.didi.entity.Driver;
 import com.ironbro.didi.entity.Order;
 import com.ironbro.didi.entity.OrderDispatchLog;
+import com.ironbro.didi.enums.AuditStatus;
 import com.ironbro.didi.enums.DispatchAction;
+import com.ironbro.didi.enums.DriverStatus;
 import com.ironbro.didi.enums.OrderStatus;
+import com.ironbro.didi.mapper.DriverMapper;
 import com.ironbro.didi.service.DriverLocationService;
 import com.ironbro.didi.service.OrderService;
 import com.ironbro.didi.mapper.OrderDispatchLogMapper;
@@ -33,7 +38,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * 派单超时重试消费者（阶段 5 改造版）
+ * 派单超时重试消费者
  *
  * 消费 dispatch.retry.queue 中的超时重试消息（由 dispatch.exchange x-delay=10s 延迟到期后路由而来）。
  *
@@ -45,22 +50,6 @@ import java.util.stream.Collectors;
  * 4. 候选列表还有剩余 → 取下一个候选司机推送，递增版本号，发新延迟消息
  * 5. 候选列表耗尽 → handleExhausted：重新 GEO 召回 + 扩圈
  *
- * 幂等设计说明（阶段 5 改造后）：
- * 版本号（order:dispatch:version:{orderId}）是核心幂等控制字段。
- * 每次推送（GlobalDispatchScheduler 初始推送 / 拒单重推 / RetryConsumer 重推）时，
- * 版本号原子递增，延迟消息携带当前版本号。10s 后消息到期时：
- * - 若司机已接单，订单状态已变更，步骤 2 会过滤
- * - 若已发生新一轮推送（拒单重推或 RetryConsumer 重推），版本号已递增，步骤 3 会过滤
- * 两层保护确保同一轮推送的超时消息不会触发重复重试。
- *
- * GlobalDispatchScheduler 初始消息说明：
- * GlobalDispatchScheduler 发出的初始延迟消息携带 version=0，
- * 与 Redis 中写入的 order:dispatch:version:{orderId}=0 一致，幂等校验通过。
- *
- * 补偿幂等锁（阶段 7）：
- * 消费前用 Redisson tryLock（key=lock:compensate:{orderId}），防止同一超时消息
- * 被多个消费者实例并发处理（多实例部署或 MQ 重投场景）。
- * leaseTime=30s，超时自动释放防死锁。
  */
 @Slf4j
 @Component
@@ -68,6 +57,7 @@ import java.util.stream.Collectors;
 public class RetryConsumer {
 
     private final OrderMapper orderMapper;
+    private final DriverMapper driverMapper;
     private final OrderDispatchLogMapper dispatchLogMapper;
     private final RabbitTemplate rabbitTemplate;
     private final StringRedisTemplate redisTemplate;
@@ -77,13 +67,13 @@ public class RetryConsumer {
     private final OrderService orderService;
 
     /**
-     * 每批派单窗口时长（毫秒）
+     * 每批派单窗口时长
      * 10s 后统一判断是否推下一个候选司机
      */
     private static final int BATCH_DELAY_MS = 10_000;
 
     /**
-     * 从下单时刻起算的最大等待时间（秒）
+     * 从下单时刻起算的最大等待时间
      * 超过此值无论处于哪个阶段（正常轮转/扩圈/等待新司机）均取消订单
      */
     private static final int MAX_WAIT_SECONDS = 120;
@@ -127,11 +117,12 @@ public class RetryConsumer {
 
         Long orderId = ((Number) body.get("orderId")).longValue();
 
-        // 解析版本号：缺失时默认 0（兼容 GlobalDispatchScheduler 发出的初始消息，该消息不携带 version 字段）
+        // 解析版本号：所有发送方（GlobalDispatchScheduler / OrderService.pushNextDriver / 本类）
+        // 均携带 version 字段，缺失时默认 0 仅作防御性兜底
         Object versionRaw = body.get("version");
         int msgVersion = versionRaw != null ? ((Number) versionRaw).intValue() : 0;
 
-        // 7.2 补偿幂等锁：防止同一超时消息被多个消费者实例并发处理
+        // 补偿幂等锁：防止同一超时消息被多个消费者实例并发处理
         String lockKey = "lock:compensate:" + orderId;
         RLock lock = redissonClient.getLock(lockKey);
         boolean locked = false;
@@ -155,7 +146,7 @@ public class RetryConsumer {
     }
 
     /**
-     * 核心重试逻辑（统一入口）
+     * 核心重试逻辑
      *
      * 处理顺序：
      * 1. 全局超时检查（从下单时刻起算 120s）
@@ -335,10 +326,15 @@ public class RetryConsumer {
     }
 
     /**
-     * GEO 召回并过滤已派过的司机
+     * GEO 召回并过滤已派过的司机，同时校验司机状态
      *
      * 扩圈后，之前在小半径内被推送但未接单的司机可能再次出现在搜索结果中。
      * 通过过滤 order:dispatched:drivers:{orderId} Set，避免对同一司机重复推送同一订单。
+     *
+     * 状态过滤说明：
+     * GEO 集合中的司机可能因状态变更（接单、下线、封禁）而不再可用，
+     * 但 GEO 集合不会实时同步这些变更（仅在司机主动下线或 FakeOnlineCleanJob 清理时移除）。
+     * 因此必须查库二次校验，只保留 ONLINE + APPROVED 的司机，与 GlobalDispatchScheduler 保持一致。
      *
      * @param alreadyDispatched 已派过的司机 ID 字符串集合（可为 null）
      * @return 过滤后的新司机 ID 列表
@@ -347,7 +343,20 @@ public class RetryConsumer {
                                        String city, Set<String> alreadyDispatched) {
         List<Long> nearby = locationService.nearbyDrivers(lat, lng, radiusKm, city, MAX_CANDIDATES);
         if (nearby.isEmpty()) return nearby;
+
+        // 查库过滤状态异常的司机：GEO 集合不实时同步状态变更，必须二次校验
+        // 只保留 ONLINE + APPROVED 的司机，防止将订单推送给行程中/封禁/未审核的司机
+        List<Driver> validDrivers = driverMapper.selectList(
+                new LambdaQueryWrapper<Driver>()
+                        .in(Driver::getId, nearby)
+                        .eq(Driver::getStatus, DriverStatus.ONLINE)
+                        .eq(Driver::getAuditStatus, AuditStatus.APPROVED));
+        Set<Long> validIds = validDrivers.stream()
+                .map(Driver::getId)
+                .collect(Collectors.toSet());
+
         return nearby.stream()
+                .filter(validIds::contains)
                 .filter(id -> alreadyDispatched == null || !alreadyDispatched.contains(String.valueOf(id)))
                 .collect(Collectors.toList());
     }

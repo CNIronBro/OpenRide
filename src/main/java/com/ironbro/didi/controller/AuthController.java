@@ -14,8 +14,7 @@ import java.util.Map;
  * 认证接口
  *
  * 登录策略：手机号 + 验证码（mock 固定为 123456）
- * 首次登录自动注册为乘客（PASSENGER），司机需管理员后台创建或单独注册接口。
- * 身份识别使用 HttpSession，无 JWT。
+ * 首次登录自动注册为乘客（PASSENGER），司机需管理员后台创建。
  */
 @RestController
 @RequestMapping("/auth")
@@ -25,10 +24,9 @@ public class AuthController {
     private final AuthService authService;
 
     /**
-     * 管理员登录（账号密码写死在 yml，不走数据库）
+     * 管理员登录
      *
      * 请求体：{ "username": "admin", "password": "admin123" }
-     * 登录成功后 Session 中 role=ADMIN，userId=-1（虚拟 ID，管理员不存数据库）
      */
     @PostMapping("/admin/login")
     public Result<Map<String, Object>> adminLogin(@RequestBody Map<String, String> body, HttpSession session) {

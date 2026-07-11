@@ -31,7 +31,7 @@ public class DriverLocationController {
     private final ObjectMapper objectMapper;
 
     /**
-     * 4.1 司机上报位置
+     * 司机上报位置
      *
      * 请求体：{ "lat": 39.99, "lng": 116.48, "timestamp": 1700000000000, "city": "default" }
      * timestamp 由客户端传入，用于乱序过滤；city 默认 "default"。
@@ -130,7 +130,7 @@ public class DriverLocationController {
     }
 
     /**
-     * 4.4 附近司机召回（供派单服务和乘客端展示使用）
+     * 附近司机召回
      *
      * 参数：lat, lng, radius（km，默认5），city（默认default）
      */

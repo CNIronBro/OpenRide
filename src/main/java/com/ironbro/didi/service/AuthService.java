@@ -16,7 +16,7 @@ import java.util.Map;
  * 认证服务
  *
  * 职责：
- * 1. 管理员账号密码校验（账号硬编码在 yml，不走数据库）
+ * 1. 管理员账号密码校验
  * 2. 乘客/司机手机号登录 + 首次自动注册
  * 3. 封禁状态校验
  *
@@ -40,8 +40,6 @@ public class AuthService {
     /**
      * 管理员登录校验
      *
-     * 账号密码来自 application.yml，不走数据库。
-     * 校验失败抛 BizException(401)。
      *
      * @param username 用户名
      * @param password 密码
@@ -62,7 +60,6 @@ public class AuthService {
      * 2. 查找已有用户，不存在则按 role 自动注册（默认 PASSENGER）
      * 3. 校验封禁状态
      *
-     * 幂等说明：同一手机号多次登录不会重复注册，以数据库中已有记录为准。
      *
      * @param phone   手机号
      * @param code    验证码

@@ -14,7 +14,6 @@ import java.util.Map;
 
 /**
  * 司机接口（个人信息、上下线、待接单轮询）
- * 位置上报在阶段 4 实现（DriverLocationController）
  */
 @RestController
 @RequestMapping("/driver")
@@ -24,7 +23,7 @@ public class DriverController {
     private final DriverService driverService;
     private final StringRedisTemplate redisTemplate;
 
-    /** 3.3 获取司机个人信息 */
+    /** 获取司机个人信息 */
     @GetMapping("/profile")
     public Result<Driver> profile(HttpSession session) {
         Long userId = SessionUtils.getUserId(session);
@@ -34,7 +33,6 @@ public class DriverController {
 
     /**
      * 乘客端查询司机基本信息（姓名、车牌、车型、评分）
-     * 无需登录，乘客在行程页通过订单中的 driverId 调用
      *
      * @param id driver 表主键（非 userId）
      */
@@ -44,11 +42,11 @@ public class DriverController {
     }
 
     /**
-     * 3.4 司机上线 / 下线
+     * 司机上线 / 下线
      *
      * 请求体：{ "online": true/false }
      * 上线前校验审核状态，未通过审核不允许上线。
-     * 下线时将状态置为 OFFLINE；位置从 GEO 集合移除在阶段 4 实现。
+     * 下线时将状态置为 OFFLINE，并将位置从 GEO 集合移除
      */
     @PutMapping("/status")
     public Result<Void> updateStatus(@RequestBody Map<String, Boolean> body, HttpSession session) {
@@ -59,7 +57,8 @@ public class DriverController {
     }
 
     /**
-     * 6.12 司机端轮询待接单通知
+     * 司机端轮询待接单通知
+     * 轮询作为 ws 方案的降级兜底
      *
      * 司机端每 2s 轮询此接口，有待接单订单时返回 orderId，无则返回 null。
      *
@@ -81,7 +80,7 @@ public class DriverController {
     }
 
     /**
-     * 9.9 司机收入统计
+     * 司机收入统计
      *
      * 返回今日收入、本周收入、今日订单数、今日行程记录列表。
      * 数据来源：order 表中 driver_id=? AND status=FINISHED 的已完成订单。

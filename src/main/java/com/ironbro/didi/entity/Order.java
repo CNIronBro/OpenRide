@@ -14,15 +14,6 @@ import java.time.LocalDateTime;
  * 订单主表实体
  * 对应 order 表
  *
- * 关键设计说明：
- * 1. version 字段：MyBatis-Plus @Version 注解，用于 CAS 乐观锁接单
- *    接单 SQL：UPDATE `order` SET driver_id=?, status='ACCEPTED', version=version+1
- *              WHERE id=? AND status='DISPATCHING' AND version=?
- *    若 version 不匹配（已被其他司机接单），更新行数为 0，接单失败。
- *
- * 2. updated_at 字段：ON UPDATE CURRENT_TIMESTAMP 自动维护
- *    xxl-job 补偿扫描依赖此字段：WHERE status='DISPATCHING' AND updated_at < NOW()-5min
- *    表示该订单超过 5 分钟没有任何状态变更，MQ 可能已丢失，需要补偿。
  */
 @Data
 @TableName("`order`")  // order 是 MySQL 保留字，需要反引号转义
@@ -79,15 +70,11 @@ public class Order {
     @Version
     private Integer version;
 
-    /** 司机接单时选择的预设路线标识（A/B/C），用于前端贴路插值动画 */
     private String routeKey;
 
     private LocalDateTime createdAt;
 
-    /**
-     * 最后更新时间，数据库 ON UPDATE CURRENT_TIMESTAMP 自动维护
-     * xxl-job 补偿扫描的核心依赖字段
-     */
+    /** 最后更新时间，数据库 ON UPDATE CURRENT_TIMESTAMP 自动维护 */
     private LocalDateTime updatedAt;
 
     private LocalDateTime acceptedAt;

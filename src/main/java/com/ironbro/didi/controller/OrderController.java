@@ -18,16 +18,6 @@ import java.util.Map;
 /**
  * 订单控制器
  *
- * 阶段 5 接口：
- * - POST /order/create  乘客下单
- * - GET  /order/{id}    查询订单状态（乘客端轮询）
- *
- * 阶段 6 新增：
- * - POST /order/{id}/accept  司机接单（CAS 乐观锁）
- * - POST /order/{id}/arrive  司机到达接客点
- * - POST /order/{id}/start   开始行程
- * - POST /order/{id}/finish  结束行程
- * - POST /order/{id}/cancel  取消订单（乘客/司机）
  */
 @RestController
 @RequestMapping("/order")
@@ -70,9 +60,8 @@ public class OrderController {
     }
 
     /**
-     * 司机接单（CAS 乐观锁）
+     * 司机接单
      *
-     * 并发场景：多个司机同时接同一订单，只有一个成功，其余返回 409。
      * 司机身份通过 session userId → driver.id 解析。
      */
     @PostMapping("/{id}/accept")
@@ -141,11 +130,8 @@ public class OrderController {
     }
 
     /**
-     * 司机主动拒单（阶段 4）
+     * 司机主动拒单
      *
-     * 拒单后立即同步推送候选列表中下一个司机，不等延迟消息超时。
-     * 原来前端"忽略"按钮只是静默关闭弹窗，现在改为调用此接口，
-     * 确保拒单场景下乘客等待时间不因 10s 超时窗口而延长。
      *
      * 校验：当前司机必须持有该订单的 pending 通知（driver:pending:order:{driverId} 存在且值为 orderId）。
      * 若 pending key 已过期（10s TTL），接口静默成功（弹窗已关闭，无需报错）。
@@ -179,12 +165,10 @@ public class OrderController {
     ) {}
 
     /**
-     * 预估价格（下单前调用）
+     * 预估价格
      *
-     * 根据起终点坐标计算直线距离，结合区域计价规则和当前供需比，
-     * 返回预估价格和 surge 系数，供前端展示"高峰期价格上浮"提示。
+     * 乘客下单前调用，根据起终点坐标计算直线距离，结合区域计价规则和当前供需比，返回预估价格。
      *
-     * 参数：originLat, originLng, destLat, destLng, region（可选，默认 default）
      */
     @GetMapping("/estimate")
     public Result<PricingService.EstimateResult> estimate(

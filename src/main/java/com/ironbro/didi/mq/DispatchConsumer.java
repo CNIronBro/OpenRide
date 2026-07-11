@@ -40,33 +40,14 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 派单消费者
+ * 派单消费者（⚠️ 当前已废弃）
  *
- * 消费 dispatch.queue 中的新订单派单消息，执行：
- * 1. GEO 召回附近在线司机候选列表（最多 MAX_CANDIDATES=20 人）
- * 2. 调度评分排序，选出最优候选列表
- * 3. 将候选列表序列化存入 Redis（key=order:candidates:{orderId}，TTL=10min）
- * 4. 写入初始批次号（key=order:dispatch:batch:index:{orderId}=0）和初始搜索半径
- * 5. 批量推送新订单通知给前 BATCH_SIZE 位司机（写 Redis，司机端轮询）
- * 6. 发送一条延迟消息到 dispatch.exchange（x-delay=10s），代表整批的接单窗口
+ * 原方案：下单后发 MQ 到 dispatch.queue，由本类消费并执行 GEO 召回 + 评分 + 批量推送。
+ * 现方案：订单创建后写入 Redis 等待池（order:waiting:pool），由 GlobalDispatchScheduler
+ * 每 2s 统一调度，替代本类的初始派单职责。
  *
- * 批量派单说明：
- * 每批同时推送 BATCH_SIZE=3 位司机，10s 内任意一人接单即成功（CAS 乐观锁兜底并发）。
- * 10s 后 RetryConsumer 统一判断是否有人接单，未接单则推下一批。
- * 候选列表耗尽后重新 GEO 召回，无新司机则按步进表扩圈，超过 120s 取消订单。
- *
- * 幂等说明（阶段 7 实现）：
- * 消费前用 Redisson tryLock（key=lock:dispatch:{orderId}），防止同一订单的派单消息
- * 被多个消费者实例并发消费两次（MQ 消息重投或多实例部署场景）。
- * leaseTime=30s，足够覆盖一次完整派单流程，超时自动释放防止死锁。
- *
- * 重复推送防护（阶段 7 实现）：
- * 推送前检查 Redis Set（key=order:dispatched:drivers:{orderId}），
- * 若司机已在集合中则跳过，防止同一司机被重复推送同一订单。
- *
- * 消费失败处理：
- * 捕获异常后 NACK（requeue=false），消息路由到 dispatch.dlx → dispatch.dlq，
- * 避免消息无限重入队列导致死循环。
+ * @RabbitListener 已注释，dispatch.queue 不再有新消息进入。
+ * 保留此类代码作为历史参考，不删除。
  */
 @Slf4j
 @Component
@@ -109,37 +90,14 @@ public class DispatchConsumer {
     private final WebSocketSessionManager wsSessionManager;
 
     /**
-     * 消费派单消息
+     * 原始派单入口
      *
-     * ⚠️ 阶段 6 废弃说明：
-     * 自适应全局派单改造完成后，订单创建不再发消息到 dispatch.queue，
-     * 改为写入 Redis 等待池（order:waiting:pool），由 GlobalDispatchScheduler 每 2s 统一调度。
-     * @RabbitListener 已注释，dispatch.queue 不再有新消息进入。
-     * 保留此类代码作为历史参考，不删除。
+     * 消息体格式（Map）：{ "orderId": Long, "originLat": BigDecimal, "originLng": BigDecimal, "city": String }
      *
-     * 消息体格式（Map）：
-     * {
-     *   "orderId":   Long,
-     *   "originLat": BigDecimal,
-     *   "originLng": BigDecimal,
-     *   "city":      String
-     * }
-     *
-     * @param message Spring AMQP 对 RabbitMQ 原始消息的封装，包含两部分：
-     *                - message.getBody()：消息体的原始字节数组，用 Jackson 反序列化成 Map
-     *                - message.getMessageProperties().getDeliveryTag()：Broker 为这条消息分配的唯一序号
-     *                  （在当前 Channel 内单调递增），ACK/NACK 时用它告诉 Broker "我确认的是哪条消息"
-     * @param channel RabbitMQ 底层 TCP 通道，用于向 Broker 发送 ACK/NACK 信号：
-     *                - basicAck(deliveryTag, false)：处理成功，Broker 删除该消息
-     *                - basicNack(deliveryTag, false, requeue=false)：处理失败，不重入队列，路由到死信队列
-     *                - 第二个参数 multiple=false 表示只确认这一条，不批量确认
-     *                使用手动 ACK 而非自动 ACK 的原因：自动 ACK 在消息到达时立即确认，
-     *                业务处理中途崩溃会导致消息丢失；手动 ACK 确保成功处理后才确认，
-     *                失败时进死信队列便于排查，幂等重复时主动 ACK 丢弃避免重入队列。
-     *                注意：Channel 操作会抛 IOException，因此方法签名需声明 throws IOException
+     * @param message Spring AMQP 消息封装
+     * @param channel 用于手动 ACK/NACK，失败时 NACK(requeue=false) 路由到 dispatch.dlq
      */
     // @RabbitListener(queues = RabbitMqConfig.DISPATCH_QUEUE)
-    // 阶段 6 废弃：新方案由 GlobalDispatchScheduler 替代 DispatchConsumer 的初始派单职责
     public void onDispatch(Message message, Channel channel) throws IOException {
         long deliveryTag = message.getMessageProperties().getDeliveryTag();//消息唯一序号。
         Map<String, Object> body;
@@ -157,12 +115,12 @@ public class DispatchConsumer {
         double originLng = ((Number) body.get("originLng")).doubleValue();
         String city = (String) body.getOrDefault("city", "default");
 
-        // 7.1 派单幂等锁：防止同一订单的派单消息被多个消费者实例并发消费两次
-        // QUESTION 此处为什么会出现多个消费者消费同一订单的情况？
-        // QUESTION 代码做了消费者确认机制，消费者A执行doDispatch()后，如果在发送ACK前网络断开或服务崩溃，MQ会因为没有收到ACK而重新投递该消息。
-        // QUESTION 如果此时A持有的分布式锁还未释放或未过期，那么消费者B再次消费时将拿不到锁，从而直接ACK跳过，避免短时间内的重复处理。
-        // QUESTION 但如果锁已经释放或过期，那么B仍可能重新拿到锁并再次执行doDispatch()
-        // QUESTION 第一次消费不受影响，会正常处理业务，因为已经执行了doDispatch()。
+        // 派单幂等锁：防止同一订单的派单消息被多个消费者实例并发消费两次
+        // 为什么会出现多个消费者消费同一订单的情况？
+        // 代码做了消费者确认机制，消费者A执行doDispatch()后，如果在发送ACK前网络断开或服务崩溃，MQ会因为没有收到ACK而重新投递该消息。
+        // 如果此时A持有的分布式锁还未释放或未过期，那么消费者B再次消费时将拿不到锁，从而直接ACK跳过，避免短时间内的重复处理。
+        // 但如果锁已经释放或过期，那么B仍可能重新拿到锁并再次执行doDispatch()
+        // 第一次消费不受影响，会正常处理业务，因为已经执行了doDispatch()。
         String lockKey = "lock:dispatch:" + orderId;
         RLock lock = redissonClient.getLock(lockKey);
         boolean locked = false;
@@ -199,14 +157,14 @@ public class DispatchConsumer {
      * @param originLng 下单位置经度
      * @param city      城市标识
      */
-    // QUESTION 在之前只做redission锁仍然不够稳，因为如果消费者B消费前消费者A已经释放了锁，那么仍然会出现重复消费的情况，所以要在业务层面再加一层保险。
-    // QUESTION 业务层面的这层保险就是“检查订单是否仍处于派单中状态”。
-    // QUESTION 只有业务层面的保险可以吗？不加redission锁可以吗？
-    // QUESTION 也不行！因为假设不加redission锁，同一个订单来了两条重复消息，被两个消费者A、B同时拿到，
-    // QUESTION 此时查出来的订单状态都处于派单中，那么都可以继续执行，又重复消费了。
-    // QUESTION redission锁的价值是限制同一个订单，同一时刻只允许一个消费者进doDispatch；
-    // QUESTION 订单状态校验的价值是校验业务正确性，因为即使拿到了锁，也不代表订单应该派。
-    // QUESTION 可能由于网络波动导致重复发了两条一样的订单到队列中，所以必须加上业务校验。
+    // 在之前只做redission锁仍然不够稳，因为如果消费者B消费前消费者A已经释放了锁，那么仍然会出现重复消费的情况，所以要在业务层面再加一层保险。
+    // 业务层面的这层保险就是“检查订单是否仍处于派单中状态”。
+    // 只有业务层面的保险可以吗？不加redission锁可以吗？
+    // 也不行！因为假设不加redission锁，同一个订单来了两条重复消息，被两个消费者A、B同时拿到，
+    // 此时查出来的订单状态都处于派单中，那么都可以继续执行，又重复消费了。
+    // redission锁的价值是限制同一个订单，同一时刻只允许一个消费者进doDispatch；
+    // 订单状态校验的价值是校验业务正确性，因为即使拿到了锁，也不代表订单应该派。
+    // 可能由于网络波动导致重复发了两条一样的订单到队列中，所以必须加上业务校验。
     private void doDispatch(Long orderId, double originLat, double originLng, String city) {
         // 检查订单是否仍处于派单中状态（防止重复消费时订单已被取消或接单）
         Order order = orderMapper.selectById(orderId);
@@ -216,7 +174,7 @@ public class DispatchConsumer {
             return;
         }
 
-        // 5.3.1 GEO 召回附近在线司机
+        // GEO 召回附近在线司机
         List<Long> nearbyDriverIds = locationService.nearbyDrivers(
                 originLat, originLng, DISPATCH_RADIUS_KM, city, MAX_CANDIDATES);
 
@@ -247,10 +205,10 @@ public class DispatchConsumer {
         List<DispatchScoreService.CandidateDriver> candidates = buildCandidates(
                 drivers, originLat, originLng, city);
 
-        // 5.3.2 调度评分排序
+        // 调度评分排序
         List<Long> sortedDriverIds = scoreService.score(candidates, DISPATCH_RADIUS_KM);
 
-        // 5.3.3 将候选列表存入 Redis（TTL=10min）
+        // 将候选列表存入 Redis（TTL=10min）
         // key=order:candidates:{orderId}，value=JSON 数组（司机 ID 列表）
         String candidatesKey = "order:candidates:" + orderId;
         String candidatesJson = toJson(sortedDriverIds);
@@ -305,7 +263,6 @@ public class DispatchConsumer {
      * 注意：Spring Data Redis 的 GeoOperations.distance() 只能计算 GEO 集合中两个成员之间的距离，
      * 无法直接计算成员与任意坐标的距离，因此改用 GEOPOS + Haversine 方式。
      */
-    // QUESTION
     private List<DispatchScoreService.CandidateDriver> buildCandidates(
             List<Driver> drivers, double originLat, double originLng, String city) {
 
@@ -334,19 +291,16 @@ public class DispatchConsumer {
      * 写入 Redis，司机端通过轮询 GET /driver/pending-order 读取。
      * key=driver:pending:order:{driverId}，value=orderId，TTL=PENDING_TTL_SECONDS（12s，略大于 10s 批次窗口）
      *
-     * 重复推送防护（7.3）：
+     * 重复推送防护：
      * 推送前检查 Redis Set（key=order:dispatched:drivers:{orderId}），
      * 若司机已在集合中则跳过，防止同一司机被重复推送同一订单。
      * 使用 SADD 的原子性保证"检查+写入"不存在竞态。
      *
-     * 设计意图：
-     * 不使用 WebSocket 推送，司机端每 2s 轮询一次此 key，
-     * 有值则弹出新订单弹窗，10s 倒计时内接单或忽略。
      *
      * @return true=推送成功，false=该司机已被推送过（跳过）
      */
     private boolean pushOrderToDriver(Long orderId, Long driverId) {
-        // 7.3 重复推送防护：SADD 返回 1 表示新增成功（未推送过），返回 0 表示已存在（已推送过）
+        // 重复推送防护：SADD 返回 1 表示新增成功（未推送过），返回 0 表示已存在（已推送过）
         // SADD 是原子操作，天然防止并发下的重复写入，无需额外加锁
         String dispatchedKey = "order:dispatched:drivers:" + orderId;
         Long added = redisTemplate.opsForSet().add(dispatchedKey, String.valueOf(driverId));
@@ -383,7 +337,6 @@ public class DispatchConsumer {
      * 更新司机派单统计信息
      * 更新 last_dispatch_at 和 dispatch_count_today，用于下次调度评分
      */
-    // QUESTION
     private void updateDriverDispatchStats(Long driverId) {
         Driver driver = driverMapper.selectById(driverId);
         if (driver != null) {

@@ -11,7 +11,7 @@ import java.util.Map;
  * 前端配置接口
  *
  * 将需要注入前端页面的配置项（如第三方 API Key）通过接口下发，
- * 避免将敏感 Key 硬编码在静态 HTML 文件中（静态文件会被直接访问，无法通过 .gitignore 保护）。
+ * 避免将敏感 Key 硬编码在静态 HTML 文件中
  */
 @RestController
 public class ConfigController {

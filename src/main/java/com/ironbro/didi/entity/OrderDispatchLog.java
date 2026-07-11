@@ -12,9 +12,6 @@ import java.time.LocalDateTime;
  * 派单操作日志实体
  * 对应 order_dispatch_log 表
  *
- * 用途：
- * 1. 记录每次派单尝试（派给哪个司机、结果如何）
- * 2. xxl-job 补偿任务执行后写入 COMPENSATED 记录，便于排查
  */
 @Data
 @TableName("order_dispatch_log")

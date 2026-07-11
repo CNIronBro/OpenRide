@@ -18,13 +18,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *
  * 维护 userId → WebSocketSession 列表的映射，支持同一用户多端登录（一对多）。
  *
- * 并发安全：
  * - 外层 Map 使用 ConcurrentHashMap，保证 register/remove 的并发安全
  * - 内层 List 使用 CopyOnWriteArrayList，保证遍历发送时不受并发注册/移除影响
  *
- * 设计约束：
- * - 当前单机部署，session 全在同一 JVM 内，内存 Map 足够
- * - 若未来横向扩展，需引入 Redis Pub/Sub 做跨节点消息转发（见 websocket-iteration-plan.md 4.6 节）
  */
 @Slf4j
 @Component

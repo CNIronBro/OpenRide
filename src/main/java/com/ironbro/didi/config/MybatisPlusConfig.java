@@ -13,7 +13,6 @@ import org.springframework.context.annotation.Configuration;
  * 注册乐观锁插件：
  * 开启后，实体类中 @Version 注解的字段会在 update 时自动追加
  * AND version=? 条件，并在成功后自增 version。
- * 这是 CAS 接单一致性的核心依赖（见 Order.version 字段注释）。
  */
 @Configuration
 public class MybatisPlusConfig {
