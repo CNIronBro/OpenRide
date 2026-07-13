@@ -157,7 +157,7 @@ graph TD
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/<your-username>/DiDi.git && cd DiDi
+git clone https://github.com/CNIronBro/OpenRide
 
 # 2. 一键启动所有中间件（首次启动自动建库建表）
 docker-compose up -d
